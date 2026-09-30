@@ -1,0 +1,25 @@
+{
+  "name": "elevation-mcp-server",
+  "version": "0.1.0",
+  "description": "Terrain analysis over elevation data: route ascent/descent profiles, bounding-box elevation grids, line-of-sight clearance, and US 3DEP point elevation.",
+  "author": {
+    "name": "cyanheads",
+    "email": "casey@caseyjhand.com",
+    "url": "https://github.com/cyanheads"
+  },
+  "homepage": "https://github.com/cyanheads/elevation-mcp-server#readme",
+  "repository": "https://github.com/cyanheads/elevation-mcp-server",
+  "license": "Apache-2.0",
+  "keywords": ["mcp", "mcp-server", "model-context-protocol", "elevation", "terrain", "geospatial", "usgs-3dep"],
+  "mcpServers": "./.codex-plugin/mcp.json",
+  "interface": {
+    "displayName": "elevation-mcp-server",
+    "shortDescription": "Route ascent/descent profiles, elevation grids, and line-of-sight clearance.",
+    "longDescription": "Computes over terrain rather than just looking up height. Sample a route for total ascent, descent, and steepest grade, pull a bounding-box elevation grid with its highest and lowest cells, or check whether terrain blocks the line of sight between two points. Point elevation uses USGS 3DEP LiDAR-derived data where the US is covered and falls back to global SRTM data elsewhere, and every sample reports which dataset answered.",
+    "developerName": "cyanheads",
+    "category": "Research",
+    "capabilities": ["Read"],
+    "websiteURL": "https://github.com/cyanheads/elevation-mcp-server",
+    "defaultPrompt": []
+  }
+}

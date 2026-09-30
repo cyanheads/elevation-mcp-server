@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "elevation-mcp-server",
+  "version": "0.1.0",
+  "description": "Terrain analysis over elevation data: route ascent/descent profiles, bounding-box elevation grids, line-of-sight clearance, and US 3DEP point elevation.",
+  "author": {
+    "name": "cyanheads",
+    "email": "casey@caseyjhand.com",
+    "url": "https://github.com/cyanheads"
+  },
+  "homepage": "https://github.com/cyanheads/elevation-mcp-server#readme",
+  "repository": "https://github.com/cyanheads/elevation-mcp-server",
+  "license": "Apache-2.0",
+  "keywords": ["mcp", "mcp-server", "model-context-protocol", "elevation", "terrain", "geospatial", "usgs-3dep"],
+  "mcpServers": {
+    "elevation-mcp-server": {
+      "command": "npx",
+      "args": ["-y", "@cyanheads/elevation-mcp-server"],
+      "env": {
+        "MCP_TRANSPORT_TYPE": "stdio"
+      }
+    }
+  }
+}

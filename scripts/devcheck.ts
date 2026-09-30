@@ -1,0 +1,1520 @@
+#!/usr/bin/env tsx
+import { type ChildProcess, spawn, spawnSync } from 'node:child_process';
+import { existsSync, readFileSync } from 'node:fs';
+import * as path from 'node:path';
+import process from 'node:process';
+import { fileURLToPath } from 'node:url';
+
+/**
+ * @fileoverview Comprehensive development script for quality and security checks.
+ * @module scripts/devcheck
+ * @description
+ *   This script runs a series of checks (linting, types, formatting, security, etc.).
+ *   It is optimized for speed with caching, incremental builds, and parallel execution.
+ *   Pre-commit hooks analyze only staged files for maximum performance.
+ *
+ * @performance
+ *   - Uses Biome for unified linting and formatting
+ *   - Uses TypeScript incremental builds (.tsbuildinfo) for faster type checking
+ *   - Runs all checks in parallel using Promise.allSettled
+ *   - Fast mode (--fast) skips slow network-bound checks
+ *
+ * @example
+ * // Run all checks (Auto-fixing enabled):
+ * // bun run scripts/devcheck.ts
+ *
+ * // Run in read-only mode:
+ * // bun run scripts/devcheck.ts --no-fix
+ *
+ * // Fast mode (skip network-bound checks like audit, outdated):
+ * // bun run scripts/devcheck.ts --fast
+ *
+ * // Skip specific checks:
+ * // bun run scripts/devcheck.ts --no-lint --no-audit
+ *
+ * // Enable optional checks (e.g., tests are off by default):
+ * // bun run scripts/devcheck.ts --test
+ *
+ * // Run only a single check (case-insensitive partial match):
+ * // bun run scripts/devcheck.ts --only lint
+ */
+/** Track active child processes for clean shutdown on SIGINT/SIGTERM. */
+const activeProcs = new Set<ChildProcess>();
+
+for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+  process.on(signal, () => {
+    for (const proc of activeProcs) {
+      proc.kill();
+    }
+    process.exit(130);
+  });
+}
+
+// =============================================================================
+// Embedded Dependencies
+// =============================================================================
+
+// picocolors (https://github.com/alexeyraspopov/picocolors) - MIT License
+// Embedded so the script runs without needing 'npm install'.
+// Respects NO_COLOR (https://no-color.org/) and FORCE_COLOR conventions.
+const isColorSupported =
+  !process.env.NO_COLOR &&
+  ((!!process.env.FORCE_COLOR && process.env.FORCE_COLOR !== '0') || !!process.stdout.isTTY);
+
+const createColor = (open: string, close: string, closeRe: RegExp) => (str: string | number) => {
+  if (!isColorSupported) return `${str}`;
+  // Replace any inner close sequences so outer color is restored
+  return open + `${str}`.replace(closeRe, close + open) + close;
+};
+
+const esc = (code: string) => new RegExp(code.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g');
+const c = {
+  bold: createColor('\x1b[1m', '\x1b[22m', esc('\x1b[22m')),
+  dim: createColor('\x1b[2m', '\x1b[22m', esc('\x1b[22m')),
+  red: createColor('\x1b[31m', '\x1b[39m', esc('\x1b[39m')),
+  green: createColor('\x1b[32m', '\x1b[39m', esc('\x1b[39m')),
+  yellow: createColor('\x1b[33m', '\x1b[39m', esc('\x1b[39m')),
+  blue: createColor('\x1b[34m', '\x1b[39m', esc('\x1b[39m')),
+  magenta: createColor('\x1b[35m', '\x1b[39m', esc('\x1b[39m')),
+  cyan: createColor('\x1b[36m', '\x1b[39m', esc('\x1b[39m')),
+};
+
+/** A type alias for the picocolors object. */
+type Colors = typeof c;
+
+// =============================================================================
+// Types & Interfaces
+// =============================================================================
+
+type RunMode = 'check' | 'fix';
+type UIMode = 'Checking' | 'Fixing';
+
+interface AppContext {
+  fastMode: boolean;
+  flags: Set<string>;
+  isHuskyHook: boolean;
+  noFix: boolean;
+  /** When set, only run checks whose name matches (case-insensitive). */
+  onlyCheck: string | null;
+  rootDir: string;
+  /** List of staged files, populated only if isHuskyHook is true. */
+  stagedFiles: string[];
+}
+
+interface CommandResult {
+  checkName: string;
+  duration: number;
+  exitCode: number;
+  /** Buffered log lines captured during parallel execution. */
+  logLines: string[];
+  skipped: boolean;
+  stderr: string;
+  stdout: string;
+  /** If set, check passed but with a warning (e.g., upstream-only vulnerabilities). */
+  warning?: string;
+}
+
+/** Represents the raw result from a shell execution. */
+type ShellResult = Omit<CommandResult, 'checkName' | 'duration' | 'skipped' | 'logLines'>;
+
+interface Check {
+  /** Indicates if the check supports auto-fixing. */
+  canFix: boolean;
+  /** The flag to skip this check (e.g., '--no-lint'). */
+  flag: string;
+  /** Function that returns the command array based on the context and mode. Returns null to skip. */
+  getCommand: (ctx: AppContext, mode: RunMode) => string[] | null;
+  /**
+   * Optional predicate to determine success.
+   * Useful for tools that signal issues via stdout or have non-standard exit codes.
+   * Return `{ success, warning }` to pass with a visible warning (e.g., upstream-only vulns).
+   */
+  isSuccess?: (
+    result: ShellResult,
+    mode: RunMode,
+  ) => boolean | { success: boolean; warning?: string };
+  name: string;
+  /** If true, check is off by default — only runs when its flag is explicitly provided. */
+  requiresFlag?: boolean;
+  /** If true, this check is skipped in fast mode (typically network-bound or very slow). */
+  slowCheck?: boolean;
+  tip?: (c: Colors) => string;
+  /**
+   * Optional rewrite of the output shown in the summary, applied after
+   * `isSuccess` has read the tool's own output. Use when a tool reports a
+   * defensible verdict under a name the project does not recognize.
+   */
+  transformOutput?: (result: ShellResult) => string;
+}
+
+// =============================================================================
+// Shell Operations
+// =============================================================================
+
+const Shell = {
+  /**
+   * Executes a shell command using child_process.spawn and returns a structured result.
+   */
+  exec(cmd: string[], options: { cwd: string }): Promise<ShellResult> {
+    const [command = '', ...args] = cmd;
+    return new Promise((resolve) => {
+      let proc: ChildProcess;
+      try {
+        proc = spawn(command, args, {
+          cwd: options.cwd,
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+      } catch (error: unknown) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        resolve({
+          exitCode: 127,
+          stdout: '',
+          stderr: `Failed to execute command: ${command}\nError: ${errorMessage}`,
+        });
+        return;
+      }
+
+      activeProcs.add(proc);
+
+      const stdoutChunks: Buffer[] = [];
+      const stderrChunks: Buffer[] = [];
+      let spawnError: Error | undefined;
+
+      proc.stdout?.on('data', (chunk: Buffer) => stdoutChunks.push(chunk));
+      proc.stderr?.on('data', (chunk: Buffer) => stderrChunks.push(chunk));
+      proc.on('error', (err) => {
+        spawnError = err;
+      });
+
+      proc.on('close', (code) => {
+        activeProcs.delete(proc);
+        if (spawnError) {
+          resolve({
+            exitCode: 127,
+            stdout: '',
+            stderr: `Failed to execute command: ${command}\nError: ${spawnError.message}`,
+          });
+        } else {
+          resolve({
+            exitCode: code ?? 1,
+            stdout: Buffer.concat(stdoutChunks).toString('utf-8').trim(),
+            stderr: Buffer.concat(stderrChunks).toString('utf-8').trim(),
+          });
+        }
+      });
+    });
+  },
+
+  /**
+   * Retrieves the list of currently staged files, filtering out deleted files.
+   */
+  async getStagedFiles(rootDir: string): Promise<string[]> {
+    // ACMR = Added, Copied, Modified, Renamed. We exclude D (Deleted).
+    const { stdout, exitCode, stderr } = await Shell.exec(
+      ['git', 'diff', '--name-only', '--cached', '--diff-filter=ACMR'],
+      { cwd: rootDir },
+    );
+
+    if (exitCode !== 0) {
+      UI.log(
+        c.yellow(
+          'Warning: Could not retrieve staged files. Is this a Git repository? Proceeding with full scan.',
+        ),
+      );
+      UI.log(c.dim(stderr));
+      return [];
+    }
+
+    return stdout.split('\n').filter(Boolean);
+  },
+};
+
+// =============================================================================
+// Configuration
+// =============================================================================
+
+const ROOT_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+/**
+ * Whether the project root is inside a git repository. The git-dependent checks
+ * (TODOs/FIXMEs, Tracked Secrets, Framework Antipatterns) shell out to
+ * `git grep`/`git ls-files`, which exit 128 — not a real finding — when there's
+ * no repo. A fresh `init` scaffold has no `.git` until the user runs `git init`,
+ * so those checks guard on this and skip cleanly instead of failing.
+ */
+const isGitRepo = (): boolean => existsSync(path.join(ROOT_DIR, '.git'));
+
+// ── Project-local config (devcheck.config.json) ─────────────────────
+
+interface DevcheckConfig {
+  depcheck?: {
+    ignores?: string[];
+    ignorePatterns?: string[];
+  };
+  outdated?: {
+    allowlist?: string[];
+  };
+  skillsSync?: {
+    ignore?: string[];
+  };
+  skillVersions?: {
+    ignore?: string[];
+  };
+}
+
+function loadDevcheckConfig(rootDir: string): DevcheckConfig {
+  try {
+    return JSON.parse(
+      readFileSync(path.join(rootDir, 'devcheck.config.json'), 'utf-8'),
+    ) as DevcheckConfig;
+  } catch {
+    return {};
+  }
+}
+
+const DEVCHECK_CONFIG = loadDevcheckConfig(ROOT_DIR);
+
+const OUTDATED_ALLOWLIST = new Set(DEVCHECK_CONFIG.outdated?.allowlist ?? []);
+
+/** Use bun for package management commands if available, otherwise npm. */
+const PM_CMD = spawnSync('bun', ['--version'], { stdio: 'ignore' }).status === 0 ? 'bun' : 'npm';
+
+// ── Declared dependency identity (alias-aware) ───────────────────────
+
+/** The package.json block that declared a dependency, as `bun outdated` marks it. */
+type DependencyGroup = 'dev' | 'optional' | 'peer' | 'prod';
+
+/**
+ * One `package.json` dependency entry resolved through any `npm:` alias.
+ * `bun outdated` reports rows under the *resolved* package name, so
+ * `"typescript-v6": "npm:typescript@^6.0.3"` is printed as `typescript`.
+ * Carrying the declared key alongside the resolved target is what lets the
+ * Outdated check name — and allowlist — the dependency the project declares.
+ */
+interface DeclaredDependency {
+  group: DependencyGroup;
+  /** The `package.json` key. */
+  key: string;
+  /** Version range with any `npm:<target>@` alias prefix stripped. */
+  range: string;
+  /** Registry package name the key resolves to; equals `key` when not aliased. */
+  target: string;
+}
+
+const DEPENDENCY_GROUPS: ReadonlyArray<readonly [DependencyGroup, string]> = [
+  ['prod', 'dependencies'],
+  ['dev', 'devDependencies'],
+  ['peer', 'peerDependencies'],
+  ['optional', 'optionalDependencies'],
+];
+
+/** Splits an `npm:<target>@<range>` alias spec; returns null for a plain range. */
+function parseAliasSpec(spec: string): { range: string; target: string } | null {
+  if (!spec.startsWith('npm:')) return null;
+  const rest = spec.slice(4);
+  // Scoped targets lead with `@`, so only a later `@` separates the range.
+  const separator = rest.lastIndexOf('@');
+  if (separator <= 0) return { range: '*', target: rest };
+  return { range: rest.slice(separator + 1), target: rest.slice(0, separator) };
+}
+
+const DECLARED_DEPENDENCIES: readonly DeclaredDependency[] = (() => {
+  try {
+    const pkg = JSON.parse(readFileSync(path.join(ROOT_DIR, 'package.json'), 'utf-8'));
+    const declared: DeclaredDependency[] = [];
+    for (const [group, block] of DEPENDENCY_GROUPS) {
+      for (const [key, spec] of Object.entries(pkg[block] ?? {})) {
+        if (typeof spec !== 'string') continue;
+        const alias = parseAliasSpec(spec);
+        declared.push({ group, key, range: alias?.range ?? spec, target: alias?.target ?? key });
+      }
+    }
+    return declared;
+  } catch {
+    return [];
+  }
+})();
+
+/** Direct dependency keys used to distinguish direct audit findings from transitive ones. */
+const DIRECT_DEPS: ReadonlySet<string> = new Set(
+  DECLARED_DEPENDENCIES.filter(({ group }) => group === 'prod' || group === 'dev').map(
+    ({ key }) => key,
+  ),
+);
+
+// ── Minimal range matching (alias attribution only) ──────────────────
+
+type VersionTriple = readonly [number, number, number];
+
+/** Parses a possibly partial version (`6`, `0.12`, `1.2.3-rc.1`) plus its precision. */
+function parseVersionParts(value: string): { segments: number; triple: VersionTriple } | null {
+  const match = /^(\d+)(?:\.(\d+))?(?:\.(\d+))?/.exec(value.trim().replace(/^[v=\s]+/, ''));
+  if (!match) return null;
+  const segments = match[3] !== undefined ? 3 : match[2] !== undefined ? 2 : 1;
+  return {
+    segments,
+    triple: [Number(match[1]), Number(match[2] ?? 0), Number(match[3] ?? 0)],
+  };
+}
+
+function compareVersions(a: VersionTriple, b: VersionTriple): number {
+  for (let index = 0; index < 3; index++) {
+    const difference = (a[index] ?? 0) - (b[index] ?? 0);
+    if (difference !== 0) return difference < 0 ? -1 : 1;
+  }
+  return 0;
+}
+
+/** The exclusive upper bound of a caret range, honoring 0.x and partial versions. */
+function caretCeiling(bound: VersionTriple, segments: number): VersionTriple {
+  if (bound[0] > 0) return [bound[0] + 1, 0, 0];
+  if (segments === 1) return [1, 0, 0];
+  if (bound[1] > 0) return [0, bound[1] + 1, 0];
+  if (segments === 2) return [0, 1, 0];
+  return [0, 0, bound[2] + 1];
+}
+
+/**
+ * Whether a version satisfies one comparator. Covers the operators a
+ * hand-written `package.json` range uses (`^`, `~`, exact, the four
+ * inequalities). Anything unrecognized is treated as unconstrained, so an
+ * exotic range never *excludes* a candidate — attribution then reports
+ * ambiguity instead of guessing.
+ */
+function comparatorAdmits(comparator: string, version: VersionTriple): boolean {
+  const token = comparator.trim();
+  if (token === '' || token === '*' || token === 'x' || token === 'latest') return true;
+  const match = /^(\^|~|>=|<=|>|<|=)?\s*(.+)$/.exec(token);
+  const parsed = parseVersionParts(match?.[2] ?? '');
+  if (!parsed) return true;
+  const order = compareVersions(version, parsed.triple);
+  switch (match?.[1] ?? '=') {
+    case '>':
+      return order > 0;
+    case '>=':
+      return order >= 0;
+    case '<':
+      return order < 0;
+    case '<=':
+      return order <= 0;
+    case '~': {
+      const ceiling: VersionTriple =
+        parsed.segments === 1
+          ? [parsed.triple[0] + 1, 0, 0]
+          : [parsed.triple[0], parsed.triple[1] + 1, 0];
+      return order >= 0 && compareVersions(version, ceiling) < 0;
+    }
+    case '^':
+      return (
+        order >= 0 && compareVersions(version, caretCeiling(parsed.triple, parsed.segments)) < 0
+      );
+    default:
+      return order === 0;
+  }
+}
+
+/** Whether an installed version falls inside a declared range. */
+function rangeAdmits(range: string, version: string): boolean {
+  const parsed = parseVersionParts(version);
+  if (!parsed) return true;
+  return range.split('||').some((alternative) =>
+    alternative
+      .trim()
+      .split(/\s+/)
+      .every((comparator) => comparatorAdmits(comparator, parsed.triple)),
+  );
+}
+
+// ── `bun outdated` row attribution ───────────────────────────────────
+
+/** Trailing workspace-type marker `bun outdated` appends to the package cell. */
+const OUTDATED_GROUP_MARKER = /\s*\((dev|peer|prod|optional)\)$/;
+
+/** One parsed `bun outdated` table row, resolved back to what package.json declares. */
+interface OutdatedRow {
+  /** Declared keys the row could belong to, in declaration order. */
+  candidates: string[];
+  current: string;
+  /** The declared key when attribution is unambiguous, else null. */
+  declaredKey: string | null;
+  /** The block the row belongs to; `bun outdated` leaves `prod` rows unmarked. */
+  group: DependencyGroup;
+  /** The row verbatim, used to key the rendered rewrite back to its line. */
+  line: string;
+  /** First cell as printed, marker included. */
+  rawName: string;
+  /** Resolved package name `bun outdated` printed. */
+  target: string;
+  update: string;
+}
+
+/**
+ * Maps a printed row back to the `package.json` keys that could have produced
+ * it. A target-name-only map is not enough: a direct dependency and one or more
+ * aliases can share a target, so candidates are narrowed by which declared
+ * range admits the installed version. When that still leaves more than one, the
+ * row is reported as ambiguous rather than attributed — an alias's allowlist
+ * entry must never stand in for a same-named direct dependency's finding.
+ */
+function attributeOutdatedRow(
+  target: string,
+  group: DependencyGroup,
+  current: string,
+): Pick<OutdatedRow, 'candidates' | 'declaredKey'> {
+  const matches = DECLARED_DEPENDENCIES.filter(
+    (declared) => declared.target === target && declared.group === group,
+  );
+  const candidates = matches.map((declared) => declared.key);
+  if (candidates.length <= 1) return { candidates, declaredKey: candidates[0] ?? null };
+
+  const admitting = matches.filter((declared) => rangeAdmits(declared.range, current));
+  return { candidates, declaredKey: admitting.length === 1 ? (admitting[0]?.key ?? null) : null };
+}
+
+/** Parses the package rows out of a `bun outdated` table, skipping its chrome. */
+function parseOutdatedRows(output: string): OutdatedRow[] {
+  const rows: OutdatedRow[] = [];
+  // `bun outdated` emits markdown-style rows (`| col1 | col2 | ... |`), so
+  // split('|') yields an empty leading cell — package data starts at index [1].
+  for (const line of output.split('\n')) {
+    if (!line.includes('|')) continue;
+    const cells = line.split('|').map((cell) => cell.trim());
+    const rawName = cells[1] ?? '';
+    // Skip table chrome: header row and separator (e.g., "---")
+    if (!rawName || rawName === 'Package' || /^-+$/.test(rawName)) continue;
+    const group = (OUTDATED_GROUP_MARKER.exec(rawName)?.[1] ?? 'prod') as DependencyGroup;
+    const target = rawName.replace(OUTDATED_GROUP_MARKER, '');
+    const current = cells[2] ?? '';
+    const update = (cells[3] ?? '').replace(/\*/g, '').trim();
+    rows.push({
+      ...attributeOutdatedRow(target, group, current),
+      current,
+      group,
+      line,
+      rawName,
+      target,
+      update,
+    });
+  }
+  return rows;
+}
+
+/**
+ * Reprints the table with each row named by the dependency the project declares,
+ * so an alias row reads as `typescript-v6 (dev)` rather than `typescript`. Rows
+ * whose attribution is ambiguous keep the printed name and are called out below
+ * the table.
+ */
+function renderOutdatedTable(output: string): string {
+  if (!output.includes('|')) return output;
+  const attributed = new Map(parseOutdatedRows(output).map((row) => [row.line, row]));
+
+  const lines = output.split('\n').map((line) => {
+    const cell = line.split('|')[1];
+    if (cell === undefined || /^-+$/.test(cell.trim())) return { line, display: null };
+    const row = attributed.get(line);
+    let display = cell.trim();
+    if (row?.declaredKey && row.declaredKey !== row.target) {
+      display = row.group === 'prod' ? row.declaredKey : `${row.declaredKey} (${row.group})`;
+    }
+    return { line, display };
+  });
+
+  // Keep bun's own column width unless a declared key needs more room; the
+  // horizontal rules then grow by the same delta so the table stays square.
+  const headerCell = lines.find(({ display }) => display === 'Package')?.line.split('|')[1];
+  const baseWidth = Math.max((headerCell?.length ?? 2) - 2, 0);
+  const width = Math.max(baseWidth, ...lines.map(({ display }) => display?.length ?? 0));
+  const delta = width - baseWidth;
+  const rendered = lines.map(({ line, display }) => {
+    if (display === null) {
+      return delta > 0 && line.includes('|')
+        ? line.replace(/-+/, (run) => run.padEnd(run.length + delta, '-'))
+        : line;
+    }
+    return `| ${display.padEnd(width)} ${line.slice(line.indexOf('|', line.indexOf('|') + 1))}`;
+  });
+
+  const ambiguous = [...attributed.values()].filter(
+    (row) => row.candidates.length > 1 && row.declaredKey === null,
+  );
+  if (ambiguous.length === 0) return rendered.join('\n');
+  return [
+    ...rendered,
+    '',
+    ...ambiguous.map(
+      (row) =>
+        `! ${row.rawName} matches ${row.candidates.join(' and ')} — attribution is ambiguous, so no allowlist entry applies.`,
+    ),
+  ].join('\n');
+}
+
+/**
+ * Parses `bun audit` output and classifies high/critical vulnerabilities as
+ * direct (in our package.json) or upstream (transitive dependency we can't fix).
+ *
+ * Bun audit format per vulnerability block — Bun 1.4 changed the header token
+ * and the path separator, so both shapes are accepted:
+ *   <package>  <version-range>        ← header, Bun <1.4 (no indent, 2+ spaces before range)
+ *   <package>@<version>               ← header, Bun ≥1.4
+ *     <parent> › <child> [› ...]      ← dependency path (indented; › or, Bun ≥1.4, > = transitive)
+ *     (direct dependency)             ← dependency path of a direct dependency, Bun ≥1.4
+ *     <severity>: <description>       ← advisory (indented)
+ *
+ * Returns null if parsing yields no results (caller should fall back to default behavior).
+ */
+function classifyAuditVulns(output: string): { direct: string[]; upstream: string[] } | null {
+  try {
+    const lines = output.split('\n');
+    const direct: string[] = [];
+    const upstream: string[] = [];
+    let i = 0;
+
+    while (i < lines.length) {
+      // Package header: non-indented `name  range` (2+ spaces, Bun <1.4) or
+      // `name@version` (Bun ≥1.4). A scoped name leads with `@`, so only a
+      // later `@` splits the Bun 1.4 form.
+      const pkgMatch = lines[i]?.match(/^(@?\w[\w./-]*)(?:\s{2,}|@)(\S.*)$/);
+      if (!pkgMatch) {
+        i++;
+        continue;
+      }
+
+      const [, pkg, versionRange] = pkgMatch;
+      i++;
+
+      let hasHighCritical = false;
+      const paths: string[] = [];
+
+      // Collect indented lines belonging to this block
+      while (i < lines.length && (lines[i]?.startsWith('  ') ?? false)) {
+        const trimmed = (lines[i] ?? '').trim();
+        if (/^(critical|high):/i.test(trimmed)) {
+          hasHighCritical = true;
+        } else if (trimmed && !/^(moderate|low):/i.test(trimmed)) {
+          paths.push(trimmed);
+        }
+        i++;
+      }
+
+      if (!hasHighCritical) continue;
+
+      // Direct if: the vulnerable package is in our package.json, or any
+      // dependency path lacks a transitive separator — U+203A `›` (Bun <1.4)
+      // or `>` (Bun ≥1.4). Bun 1.4's literal `(direct dependency)` path has neither.
+      const pkgName = pkg ?? '';
+      const isDirect = DIRECT_DEPS.has(pkgName) || paths.some((p) => !/[\u203a>]/.test(p));
+      if (isDirect) {
+        direct.push(`${pkgName} ${versionRange}`);
+      } else {
+        const via = paths[0]?.split(/\s*[\u203a>]\s*/)[0] ?? 'unknown';
+        upstream.push(`${pkgName} ${versionRange} (via ${via})`);
+      }
+    }
+
+    // If we found nothing despite high/critical text existing, parsing may have failed
+    if (direct.length === 0 && upstream.length === 0) return null;
+
+    return { direct, upstream };
+  } catch {
+    return null;
+  }
+}
+
+// Define file extensions for linting and formatting
+const LINT_EXTS = ['.ts', '.tsx', '.js', '.jsx'];
+
+/**
+ * Worker tsconfig locations, in precedence order. A project keeps its project
+ * tsconfigs in `config/` or at the root — the `init` scaffold writes the root
+ * form — and this script ships to both verbatim.
+ */
+const WORKER_PROJECT_CANDIDATES = ['config/tsconfig.worker.json', 'tsconfig.worker.json'];
+
+const ALL_CHECKS: Check[] = [
+  // Fast checks first (local operations, no network)
+  {
+    name: 'TODOs/FIXMEs',
+    flag: '--no-todos',
+    canFix: false,
+    getCommand: (ctx) => {
+      if (!isGitRepo()) return null; // no repo to grep — fresh scaffold before `git init`
+      // git grep -n (line number) -E (extended regex) -i (case-insensitive)
+      const baseCmd = ['git', 'grep', '-nEi', '\\b(TODO|FIXME)\\b'];
+      // Exclude files where TODO/FIXME appears as prose or intentional stubs
+      const excludes = [
+        ':!CHANGELOG.md',
+        ':!changelog/',
+        ':!*.lock',
+        ':!scripts/devcheck.ts',
+        ':!tests/',
+      ];
+      if (ctx.isHuskyHook && ctx.stagedFiles.length > 0) {
+        // Check only staged files in the working tree
+        return [...baseCmd, '--', ...excludes, ...ctx.stagedFiles];
+      }
+      // Check the entire tracked repository (default behavior of git grep)
+      return [...baseCmd, '--', ...excludes];
+    },
+    // git grep: exit 0 = matches found, exit 1 = no matches, exit 2+ = error.
+    isSuccess: (result) => {
+      if (result.exitCode === 0) return false; // Found TODOs — fail
+      if (result.exitCode === 1) return true; // No matches — pass
+      // Exit code >= 2 means git grep itself errored. Treat as failure
+      // but override stdout so the summary shows the actual error, not "TODOs found".
+      return false;
+    },
+    tip: (c) => `Resolve ${c.bold('TODO')} or ${c.bold('FIXME')} comments before committing.`,
+  },
+  {
+    name: 'Tracked Secrets',
+    flag: '--no-secrets',
+    canFix: false,
+    // Check if common sensitive files are tracked by git.
+    getCommand: () => {
+      if (!isGitRepo()) return null; // no repo — `git ls-files` would exit 128, not a finding
+      return [
+        'git',
+        'ls-files',
+        '*.env*',
+        '**/.npmrc',
+        '**/.netrc',
+        '**/credentials.json',
+        '**/*.pem',
+        '**/*.key',
+        '**/secret*',
+        '**/.htpasswd',
+      ];
+    },
+    // Success if output is empty OR only contains safe patterns.
+    isSuccess: (result, _mode) => {
+      if (result.exitCode !== 0) return false;
+      const SAFE_PATTERNS = ['.env.example', '.env.template', '.env.sample'];
+      const files = result.stdout.trim().split('\n').filter(Boolean);
+      const dangerous = files.filter((f) => !SAFE_PATTERNS.some((safe) => f.endsWith(safe)));
+      return dangerous.length === 0;
+    },
+    tip: (c) =>
+      `Add sensitive files to ${c.bold('.gitignore')} and run ${c.bold('git rm --cached <file>')}.`,
+  },
+  {
+    name: 'MCP Definitions',
+    flag: '--no-mcp-lint',
+    canFix: false,
+    getCommand: () => ['bun', 'run', 'scripts/lint-mcp.ts'],
+    tip: (c) =>
+      `Fix definition errors above — each diagnostic links to its rule in ${c.bold('framework-skills/api-linter/SKILL.md')}.`,
+  },
+  {
+    name: 'Packaging',
+    flag: '--no-packaging',
+    canFix: false,
+    // Validates env var alignment between manifest.json (MCPB bundle) and
+    // server.json (MCP Registry), plus plugin marketplace manifests (#240), the
+    // bundle-content guards on .mcpbignore (#343), the README version badge
+    // (#418), and the Dockerfile build platform. Runs when any of those inputs
+    // is present; skipped cleanly when none exist — consumers on an HTTP-only
+    // deploy are unaffected. README.md and Dockerfile are triggers in their own
+    // right: each check must gate a project that carries no bundle or plugin
+    // metadata at all, which the other inputs only covered incidentally.
+    getCommand: () => {
+      const inputs = [
+        'manifest.json',
+        '.claude-plugin/plugin.json',
+        '.codex-plugin/plugin.json',
+        '.codex-plugin/mcp.json',
+        '.mcpbignore',
+        'README.md',
+        'Dockerfile',
+      ];
+      if (!inputs.some((input) => existsSync(path.join(ROOT_DIR, input)))) return null;
+      return ['bun', 'run', 'scripts/lint-packaging.ts'];
+    },
+    tip: (c) =>
+      `Align env var names between ${c.bold('manifest.json')} ${c.bold('mcp_config.env')} and ${c.bold('server.json')} stdio package ${c.bold('environmentVariables[]')}.`,
+  },
+  {
+    name: 'Framework Antipatterns',
+    flag: '--no-framework-antipatterns',
+    canFix: false,
+    // Runs `git grep` per rule; skip cleanly without a repo (fresh scaffold before `git init`).
+    getCommand: () => {
+      if (!isGitRepo()) return null;
+      return ['bun', 'run', 'scripts/check-framework-antipatterns.ts'];
+    },
+    tip: (c) =>
+      `Remove the flagged SDK-coupling shortcut. See ${c.bold('scripts/check-framework-antipatterns.ts')} for rule rationale.`,
+  },
+  {
+    name: 'Dependency Specifiers',
+    flag: '--no-dep-specifiers',
+    canFix: false,
+    // Rejects floating specifiers (latest/*/dist-tags) in package.json + the
+    // bun.lock workspaces map (#246). Static and local — no network, no git —
+    // so it runs in the default and --fast passes. Shipped to consumers via
+    // package.json `files:`; reads package.json/bun.lock directly, no guard.
+    getCommand: () => ['bun', 'run', 'scripts/check-dependency-specifiers.ts'],
+    tip: (c) =>
+      `Pin the flagged dep to a concrete range; after ${c.bold('bun update --latest')} run a plain ${c.bold('bun install')} to reconcile ${c.bold('bun.lock')}.`,
+  },
+  {
+    name: 'Open-Indexed Interfaces',
+    flag: '--no-open-index',
+    canFix: false,
+    // Framework-only AST check (#123): flags interfaces mixing named members with an
+    // open `[key: string]: unknown|any` index signature that lack an opt-out comment.
+    // Not shipped in package.json `files:`, so the existence guard skips it cleanly in
+    // consumer projects — the pattern is common and legitimate in consumer code.
+    getCommand: () => {
+      if (!existsSync(path.join(ROOT_DIR, 'scripts/audit-open-index-signatures.ts'))) return null;
+      return ['bun', 'run', 'scripts/audit-open-index-signatures.ts'];
+    },
+    tip: (c) =>
+      `Add ${c.bold('// allow open-indexed-named: <rationale>')} above the index signature, or use explicit fields. See ${c.bold('scripts/audit-open-index-signatures.ts')}.`,
+  },
+  {
+    name: 'Docs Sync',
+    flag: '--no-docs-sync',
+    canFix: false,
+    getCommand: () => ['bun', 'run', 'scripts/check-docs-sync.ts'],
+    tip: (c) =>
+      `Edit both files together, or run ${c.bold('cp CLAUDE.md AGENTS.md')} (or reverse) to resync.`,
+  },
+  {
+    name: 'Skills Sync',
+    flag: '--no-skills-sync',
+    canFix: false,
+    // Compares canonical framework-skills/ against local mirrors (.agents/skills, .claude/skills).
+    // Skipped when framework-skills/ or both mirrors are absent (non-mirrored projects),
+    // except that a pre-0.13 `skills/` tree always runs — absent or alongside
+    // `framework-skills/` — so the script's migration message surfaces. Drift is demoted to
+    // a warning via isSuccess — intentional ignores live in devcheck.config.json
+    // `skillsSync.ignore`.
+    getCommand: () => {
+      const hasSkills = existsSync(path.join(ROOT_DIR, 'framework-skills'));
+      const hasLegacySkills = existsSync(path.join(ROOT_DIR, 'skills'));
+      const hasMirrors =
+        existsSync(path.join(ROOT_DIR, '.agents/skills')) ||
+        existsSync(path.join(ROOT_DIR, '.claude/skills'));
+      if (!hasLegacySkills && (!hasSkills || !hasMirrors)) return null;
+      return ['bun', 'run', 'scripts/check-skills-sync.ts'];
+    },
+    isSuccess: (result) => {
+      if (result.exitCode === 0) return true;
+      const firstLine = result.stdout.split('\n')[0]?.trim() || 'Skills mirrors have drifted.';
+      return { success: true, warning: firstLine };
+    },
+    tip: (c) =>
+      `Propagate ${c.bold('framework-skills/')} to ${c.bold('.agents/skills/')} and ${c.bold('.claude/skills/')}, or add entries to ${c.bold('devcheck.config.json')} ${c.bold('skillsSync.ignore')}.`,
+  },
+  {
+    name: 'Skill Versions',
+    flag: '--no-skill-versions',
+    canFix: false,
+    // Flags framework-skills/<name>/SKILL.md body changes (vs HEAD) that lack a metadata.version
+    // bump (#99), and, in the framework repo, a skill bumped more than one step past the last
+    // release tag. Skipped when framework-skills/ is absent. Drift is demoted to a warning via
+    // isSuccess — the typo/whitespace carve-out lives in devcheck.config.json
+    // `skillVersions.ignore`.
+    getCommand: () => {
+      if (!existsSync(path.join(ROOT_DIR, 'framework-skills'))) return null;
+      return ['bun', 'run', 'scripts/check-skill-versions.ts'];
+    },
+    isSuccess: (result) => {
+      if (result.exitCode === 0) return true;
+      const firstLine =
+        result.stdout.split('\n')[0]?.trim() || 'Skill versions are out of step with the policy.';
+      return { success: true, warning: firstLine };
+    },
+    tip: (c) =>
+      `Bump ${c.bold('metadata.version')} once per release in the changed ${c.bold('SKILL.md')}, or add it to ${c.bold('devcheck.config.json')} ${c.bold('skillVersions.ignore')}.`,
+  },
+  {
+    name: 'Changelog Sync',
+    flag: '--no-changelog-sync',
+    canFix: false,
+    // --check exits non-zero if CHANGELOG.md drifts from changelog/*.md.
+    // Skipped cleanly when the directory-based changelog isn't in use — CHANGELOG.md
+    // alone is a supported configuration (runtime-only consumers, opt-out per #41).
+    getCommand: () => {
+      if (!existsSync(path.join(ROOT_DIR, 'changelog'))) return null;
+      return ['bun', 'run', 'scripts/build-changelog.ts', '--check'];
+    },
+    tip: (c) =>
+      `Edit the per-version file in ${c.bold('changelog/')} and run ${c.bold('bun run changelog:build')} to regenerate ${c.bold('CHANGELOG.md')}.`,
+  },
+  {
+    name: 'Biome',
+    flag: '--no-lint',
+    canFix: true,
+    getCommand: (ctx, mode) => {
+      const command = [path.join(ctx.rootDir, 'node_modules', '.bin', 'biome'), 'check'];
+      if (mode === 'fix') {
+        command.push('--write');
+      }
+      // In husky mode, target only staged files; otherwise let biome.json includes handle it
+      if (ctx.isHuskyHook && ctx.stagedFiles.length > 0) {
+        const relevant = ctx.stagedFiles.filter((file) =>
+          [...LINT_EXTS, '.json'].includes(path.extname(file)),
+        );
+        if (relevant.length === 0) return null;
+        command.push(...relevant);
+      }
+      return command;
+    },
+    tip: (c) => `Run without ${c.bold('--no-fix')} to automatically fix issues.`,
+  },
+  {
+    name: 'TypeScript',
+    flag: '--no-types',
+    canFix: false,
+    // TypeScript generally needs the whole project context for accurate checking.
+    getCommand: (ctx) => [path.join(ctx.rootDir, 'node_modules', '.bin', 'tsc'), '--noEmit'],
+    tip: () => 'Check TypeScript errors in your IDE or the console output.',
+  },
+  {
+    name: 'TypeScript (Worker)',
+    flag: '--no-types-worker',
+    canFix: false,
+    // The workerd type environment is its own program: Cloudflare's ambient
+    // globals cannot share one with @types/node's (#397). It reads the built
+    // declarations, so it only has something to check after a build. The
+    // tsconfig is looked for in both supported layouts — `config/` and the
+    // project root, which is where the `init` scaffold writes its tsconfigs
+    // (#440) — and the step skips only when neither carries one.
+    getCommand: (ctx) => {
+      const project = WORKER_PROJECT_CANDIDATES.find((candidate) =>
+        existsSync(path.join(ctx.rootDir, candidate)),
+      );
+      if (!project) return null;
+      if (!existsSync(path.join(ctx.rootDir, 'dist'))) return null;
+      return [
+        path.join(ctx.rootDir, 'node_modules', '.bin', 'tsc'),
+        '--project',
+        project,
+        '--noEmit',
+      ];
+    },
+    tip: (c) =>
+      `Build first (${c.bold('bun run build')}), then ${c.bold('bun run typecheck:worker')}.`,
+  },
+  {
+    name: 'Tests',
+    flag: '--test',
+    canFix: false,
+    requiresFlag: true,
+    getCommand: (ctx) => [path.join(ctx.rootDir, 'node_modules', '.bin', 'vitest'), 'run'],
+    tip: () => 'Fix failing tests before committing.',
+  },
+  {
+    name: 'Unused Dependencies',
+    flag: '--no-depcheck',
+    canFix: false,
+    slowCheck: true,
+    getCommand: (ctx) => {
+      const cmd = [path.join(ctx.rootDir, 'node_modules', '.bin', 'depcheck')];
+      const ignores = DEVCHECK_CONFIG.depcheck?.ignores ?? ['@types/*'];
+      if (ignores.length > 0) cmd.push(`--ignores=${ignores.join(',')}`);
+      const patterns = DEVCHECK_CONFIG.depcheck?.ignorePatterns ?? [];
+      if (patterns.length > 0) cmd.push(`--ignore-patterns=${patterns.join(',')}`);
+      return cmd;
+    },
+    tip: (c) =>
+      `Remove unused packages with ${c.bold(`${PM_CMD} remove <pkg>`)} or add to ${c.bold('devcheck.config.json')} ignores.`,
+  },
+  // Slow checks last (network-bound operations)
+  {
+    name: 'Security Audit',
+    flag: '--no-audit',
+    canFix: false, // `audit fix` exists but often requires manual review.
+    slowCheck: true,
+    getCommand: () => [PM_CMD, 'audit'],
+    isSuccess: (result, _mode) => {
+      // If the command exits 0, no vulnerabilities were found.
+      if (result.exitCode === 0) return true;
+
+      const output = result.stdout;
+      if (output.includes('0 vulnerabilities found')) return true;
+
+      // Detect audit failures (connection errors, registry issues, etc.)
+      // If the output doesn't look like a valid audit response, warn rather than silently passing.
+      const looksLikeAuditOutput = /vulnerabilit|severity|advisori/i.test(output);
+      if (!looksLikeAuditOutput) {
+        return {
+          success: true,
+          warning: `Audit command failed (exit ${result.exitCode}) — could not reach registry. Output: ${output.slice(0, 200).trim() || '(empty)'}`,
+        };
+      }
+
+      // Pass if only low/moderate severity
+      const hasHighOrCritical = /high|critical/i.test(output);
+      if (!hasHighOrCritical) return true;
+
+      // Classify: direct deps we can fix vs transitive deps we can't
+      const classified = classifyAuditVulns(output);
+
+      // If parsing failed, fall back to failing (conservative)
+      if (!classified) return false;
+
+      // Direct dep vulnerabilities — we can and should fix these
+      if (classified.direct.length > 0) return false;
+
+      // All high/critical are upstream/transitive — warn but don't fail
+      if (classified.upstream.length > 0) {
+        const n = classified.upstream.length;
+        return {
+          success: true,
+          warning: [
+            `${n} high/critical vulnerabilit${n === 1 ? 'y' : 'ies'} in transitive deps (upstream, no direct fix available):`,
+            ...classified.upstream.map((v) => `  - ${v}`),
+          ].join('\n'),
+        };
+      }
+
+      return true;
+    },
+    tip: (c) =>
+      `Direct dependency vulnerabilities found. Run ${c.bold(`${PM_CMD} audit fix`)} or ${c.bold(`${PM_CMD} update <pkg>`)} to resolve.`,
+  },
+  {
+    name: 'Dependencies (Outdated)',
+    flag: '--no-deps',
+    canFix: false,
+    slowCheck: true,
+    getCommand: () => [PM_CMD, 'outdated'],
+    isSuccess: (result) => {
+      // Exit 0 with empty output = everything up to date
+      if (result.exitCode === 0 && result.stdout.trim() === '') return true;
+
+      // Non-zero exit with no tabular output likely means a network/lockfile error — fail hard
+      const output = result.stdout.trim();
+      if (result.exitCode !== 0 && !output.includes('|')) return false;
+
+      // A row is a real finding only if it's neither allowlisted, a peer range,
+      // nor a version held back by bunfig's `minimumReleaseAge` supply-chain guard.
+      const unexpected = parseOutdatedRows(output).filter((row) => {
+        // The allowlist is keyed on the `package.json` key, so an aliased row
+        // matches through its resolved declaration. Where attribution stayed
+        // ambiguous, no entry applies — suppressing the row would risk hiding a
+        // same-named direct dependency behind an alias's exemption.
+        const ambiguous = row.candidates.length > 1 && row.declaredKey === null;
+        if (!ambiguous && OUTDATED_ALLOWLIST.has(row.declaredKey ?? row.target)) return false;
+
+        // A peerDependency range declares the *lowest* version supported, not
+        // the version to track — widening it as upstream publishes only narrows
+        // what consumers may install. Currency for the versions actually
+        // exercised is enforced through the matching devDependency row.
+        if (row.group === 'peer') return false;
+
+        // `Update` is the newest version installable under the declared range;
+        // `Latest` ignores the range. Update === Current means there is nothing
+        // to adopt — either `minimumReleaseAge` is holding a fresh publish, or
+        // the range deliberately caps below latest (an exact pin, `^12` against
+        // 13.0.1). Crossing that cap is a deliberate range change, i.e.
+        // maintenance work rather than a gate failure. The gate fails on what
+        // `bun update` would actually change: being behind within the range.
+        return !(row.current !== '' && row.update === row.current);
+      });
+
+      return unexpected.length === 0;
+    },
+    transformOutput: (result) => renderOutdatedTable(result.stdout),
+    tip: (c) =>
+      `Run ${c.bold(`${PM_CMD} update`)} to upgrade; the ${c.bold('maintenance')} skill then investigates changelogs and adopts upstream changes. Configure allowlist in ${c.bold('devcheck.config.json')}.`,
+  },
+];
+
+// =============================================================================
+// UI & Logging
+// =============================================================================
+
+const UI = {
+  log: console.log,
+
+  // ---------------------------------------------------------------------------
+  // Format helpers — return strings for buffered output during parallel execution
+  // ---------------------------------------------------------------------------
+
+  formatCheckStart(check: Check, command: string[], mode: UIMode): string {
+    let commandStr = command.join(' ');
+    if (commandStr.length > 150) {
+      commandStr = `${commandStr.substring(0, 147)}... (truncated)`;
+    }
+    return [
+      `${c.bold(c.blue('🔷'))} ${mode} ${c.yellow(check.name)}${c.blue('...')} `,
+      c.dim(`   $ ${commandStr}`),
+    ].join('\n');
+  },
+
+  formatSkipped(check: Check, reason: string): string {
+    return `${c.bold(c.yellow(`🔶 Skipping ${check.name}...`))}${c.dim(` (${reason})`)}`;
+  },
+
+  /**
+   * The running-log line for a finished step. A result `isSuccess` demoted to a
+   * warning is reported as one here too, on `printSummary`'s own guard
+   * (`exitCode === 0 && warning`), so the two surfaces cannot disagree about a
+   * single outcome (#344). A `{ success: false, warning }` return keeps its
+   * non-zero exit and so still renders as a failure.
+   */
+  formatCheckResult(result: CommandResult, _mode: UIMode): string {
+    const { checkName, exitCode, duration, warning } = result;
+    if (exitCode === 0 && warning) {
+      return [
+        `${c.bold(c.yellow('⚠️'))} ${c.yellow(checkName)} ${c.yellow(`finished with a warning in ${duration}ms.`)}`,
+        c.yellow(warning.replace(/^/gm, '   | ')),
+      ].join('\n');
+    }
+    if (exitCode === 0) {
+      return `${c.bold(c.green('✅'))} ${c.yellow(checkName)} ${c.green(`finished successfully in ${duration}ms.`)}`;
+    }
+    return `${c.bold(c.red('❌'))} ${c.yellow(checkName)} ${c.red(`failed (Code ${exitCode}) in ${duration}ms.`)}`;
+  },
+
+  // ---------------------------------------------------------------------------
+  // Print helpers — write directly to stdout (used outside parallel sections)
+  // ---------------------------------------------------------------------------
+
+  /** Flush buffered log lines from a completed check result. */
+  flushCheckLog(result: CommandResult) {
+    for (const line of result.logLines) {
+      UI.log(line);
+    }
+  },
+
+  printHeader(ctx: AppContext) {
+    let modeMessage: string;
+    if (ctx.isHuskyHook) {
+      const fileCount = ctx.stagedFiles.length;
+      const mode = ctx.noFix ? 'Read-only' : 'Auto-fixing';
+      modeMessage = c.magenta(
+        `(Husky Hook: ${mode} - ${fileCount} file${fileCount === 1 ? '' : 's'} staged)`,
+      );
+    } else {
+      const fixMode = ctx.noFix ? 'Read-only' : 'Auto-fixing';
+      const speedMode = ctx.fastMode ? ' - Fast mode' : '';
+      modeMessage = ctx.noFix
+        ? c.dim(`(${fixMode} mode${speedMode})`)
+        : c.magenta(`(${fixMode} mode${speedMode})`);
+    }
+
+    UI.log(`${c.bold('🚀 DevCheck: Kicking off comprehensive checks...')} ${modeMessage}\n`);
+  },
+
+  printSummary(results: CommandResult[], ctx: AppContext): boolean {
+    UI.log(`\n${c.bold('📊 Checkup Summary:')}`);
+    UI.log('------------------------------------------------');
+
+    let overallSuccess = true;
+    const failedChecks: Check[] = [];
+
+    for (const result of results) {
+      let status: string;
+      if (result.skipped) {
+        status = `${c.yellow('⚪ SKIPPED')}`;
+      } else if (result.exitCode === 0 && result.warning) {
+        status = `${c.yellow('⚠️  WARNING')}`;
+      } else if (result.exitCode === 0) {
+        status = `${c.green('✅ PASSED')}`;
+      } else {
+        status = `${c.red('❌ FAILED')}`;
+        overallSuccess = false;
+        const foundCheck = ALL_CHECKS.find((check) => check.name === result.checkName);
+        if (foundCheck) failedChecks.push(foundCheck);
+      }
+
+      const durationStr = result.skipped ? '' : c.dim(`(${result.duration}ms)`);
+      UI.log(`${c.bold(result.checkName.padEnd(25))} ${status} ${durationStr}`);
+
+      // Display warning details for passing checks with warnings
+      if (result.exitCode === 0 && result.warning) {
+        UI.log(c.yellow(result.warning.replace(/^/gm, '   | ')));
+        UI.log('');
+      }
+
+      // Display check output (dimmed for passing, red stderr for failures)
+      if (!result.skipped && (result.stdout || result.stderr)) {
+        if (result.stdout) UI.log(c.dim(result.stdout.replace(/^/gm, '   | ')));
+        if (result.stderr) {
+          UI.log(
+            result.exitCode !== 0
+              ? c.red(result.stderr.replace(/^/gm, '   | '))
+              : c.dim(result.stderr.replace(/^/gm, '   | ')),
+          );
+        }
+        UI.log('');
+      }
+    }
+
+    UI.log('\n------------------------------------------------');
+
+    if (!overallSuccess) {
+      if (ctx.noFix || failedChecks.some((check) => !check.canFix)) {
+        UI.log(`\n${c.bold(c.cyan('💡 Tips & Actions:'))}`);
+        for (const check of failedChecks) {
+          if (check.tip) {
+            UI.log(`   - ${c.bold(check.name)}: ${c.dim(check.tip(c))}`);
+          }
+        }
+      }
+      if (!ctx.noFix) {
+        UI.log(
+          `\n${c.yellow('⚠️ Note: Some issues may have been fixed automatically, but others require manual intervention.')}`,
+        );
+      }
+    }
+
+    return overallSuccess;
+  },
+
+  printFooter(success: boolean, totalDuration: number) {
+    const timeStr = c.dim(`(total: ${totalDuration}ms)`);
+    if (success) {
+      UI.log(`\n${c.bold(c.green('🎉 All checks passed! Ship it!'))} ${timeStr}`);
+    } else {
+      UI.log(`\n${c.bold(c.red('🛑 Found issues. Please review the output above.'))} ${timeStr}`);
+    }
+  },
+
+  printError(error: unknown) {
+    console.error(`${c.red('\nAn unexpected error occurred in the check script:')}`, error);
+  },
+};
+
+// =============================================================================
+// Core Logic
+// =============================================================================
+
+/** Global flags handled separately from per-check skip flags. */
+const GLOBAL_FLAGS = new Set(['--no-fix', '--husky-hook', '--fast', '--help', '--only']);
+
+/** All recognized flags (global + per-check skip flags). */
+const KNOWN_FLAGS = new Set([...GLOBAL_FLAGS, ...ALL_CHECKS.map((check) => check.flag)]);
+
+function printHelp() {
+  UI.log(`${c.bold('Usage:')} bun run devcheck [options]\n`);
+  UI.log(`${c.bold('Options:')}`);
+  UI.log(`  ${c.yellow('--no-fix')}        Run in read-only mode (no auto-fixing)`);
+  UI.log(`  ${c.yellow('--fast')}          Skip slow network-bound checks (audit, outdated)`);
+  UI.log(
+    `  ${c.yellow('--husky-hook')}    Run in pre-commit hook mode (analyze staged files only)`,
+  );
+  UI.log(
+    `  ${c.yellow('--only <name>')}   Run only the named check (case-insensitive partial match)`,
+  );
+  UI.log(`  ${c.yellow('--help')}          Show this help message\n`);
+  const optOutChecks = ALL_CHECKS.filter((ch) => !ch.requiresFlag);
+  const optInChecks = ALL_CHECKS.filter((ch) => ch.requiresFlag);
+
+  UI.log(`${c.bold('Skip individual checks:')}`);
+  for (const check of optOutChecks) {
+    const slow = check.slowCheck ? c.dim(' (slow)') : '';
+    UI.log(`  ${c.yellow(check.flag.padEnd(18))} Skip ${check.name}${slow}`);
+  }
+
+  if (optInChecks.length > 0) {
+    UI.log(`\n${c.bold('Enable optional checks (off by default):')}`);
+    for (const check of optInChecks) {
+      UI.log(`  ${c.yellow(check.flag.padEnd(18))} Run ${check.name}`);
+    }
+  }
+  UI.log('');
+}
+
+/**
+ * Parses CLI arguments and determines the initial run context.
+ * Returns null if the program should exit (e.g., --help).
+ */
+function parseArgs(args: string[]): Omit<AppContext, 'rootDir' | 'stagedFiles'> | null {
+  const flags = new Set<string>();
+  let noFix = false;
+  let isHuskyHook = false;
+  let fastMode = false;
+  let onlyCheck: string | null = null;
+
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i] as string;
+    if (arg === '--help') {
+      printHelp();
+      return null;
+    } else if (arg === '--no-fix') {
+      noFix = true;
+    } else if (arg === '--husky-hook') {
+      isHuskyHook = true;
+    } else if (arg === '--fast') {
+      fastMode = true;
+    } else if (arg === '--only') {
+      const next = args[i + 1];
+      if (!next || next.startsWith('--')) {
+        UI.log(c.red('Error: --only requires a check name argument.'));
+        UI.log(c.dim(`  Example: ${c.bold('bun run devcheck --only lint')}\n`));
+        UI.log(c.dim('Available checks:'));
+        for (const check of ALL_CHECKS) {
+          UI.log(c.dim(`  - ${check.name}`));
+        }
+        return null;
+      }
+      onlyCheck = next;
+      i++; // consume the next arg
+    } else if (arg.startsWith('--')) {
+      if (!KNOWN_FLAGS.has(arg)) {
+        UI.log(c.yellow(`Warning: Unknown flag '${arg}' — ignoring.`));
+        UI.log(c.dim(`  Run with ${c.bold('--help')} to see available options.\n`));
+      } else {
+        flags.add(arg);
+      }
+    }
+  }
+
+  // Also detect if running inside environment set by Husky
+  if (process.env.HUSKY === '1' || process.env.GIT_PARAMS) {
+    isHuskyHook = true;
+  }
+
+  return { flags, noFix, isHuskyHook, fastMode, onlyCheck };
+}
+
+async function runCheck(check: Check, ctx: AppContext): Promise<CommandResult> {
+  const { name, getCommand, isSuccess, transformOutput } = check;
+  const log: string[] = [];
+  const baseResult: CommandResult = {
+    checkName: name,
+    exitCode: 0,
+    stdout: '',
+    stderr: '',
+    duration: 0,
+    skipped: false,
+    logLines: log,
+  };
+
+  // 1. Check for --only filter
+  if (ctx.onlyCheck) {
+    const match = check.name.toLowerCase().includes(ctx.onlyCheck.toLowerCase());
+    if (!match) {
+      log.push(UI.formatSkipped(check, `--only ${ctx.onlyCheck}`));
+      return { ...baseResult, skipped: true };
+    }
+  }
+
+  // 2. Handle opt-in vs opt-out flags
+  if (check.requiresFlag) {
+    // Opt-in: only runs when flag is explicitly provided
+    if (!ctx.flags.has(check.flag)) {
+      log.push(UI.formatSkipped(check, `Pass ${check.flag} to enable`));
+      return { ...baseResult, skipped: true };
+    }
+  } else {
+    // Opt-out: runs by default, skip when flag is provided
+    if (ctx.flags.has(check.flag)) {
+      log.push(UI.formatSkipped(check, `Flag ${check.flag} provided`));
+      return { ...baseResult, skipped: true };
+    }
+  }
+
+  // 3. Skip slow checks in fast mode
+  if (ctx.fastMode && check.slowCheck) {
+    log.push(UI.formatSkipped(check, 'Skipped in fast mode'));
+    return { ...baseResult, skipped: true };
+  }
+
+  // 4. Determine command and mode
+  const useFixCommand = !ctx.noFix && check.canFix;
+  const runMode: RunMode = useFixCommand ? 'fix' : 'check';
+  const uiMode: UIMode = useFixCommand ? 'Fixing' : 'Checking';
+
+  const command = getCommand(ctx, runMode);
+
+  // 5. Check if command generation resulted in no action (e.g., no relevant staged files)
+  if (!command || command.length === 0) {
+    log.push(UI.formatSkipped(check, 'No relevant files to check'));
+    return { ...baseResult, skipped: true };
+  }
+
+  log.push(UI.formatCheckStart(check, command, uiMode));
+
+  // 6. Execute the command
+  const startTime = performance.now();
+  const result = await Shell.exec(command, { cwd: ctx.rootDir });
+  const duration = Math.round(performance.now() - startTime);
+
+  // Bun's node-shim (via `bun run`) emits "Registry URL must be" errors when
+  // depcheck encounters `cloudflare:*` virtual-module specifiers in Workers
+  // tests. depcheck.ignores already filters them from the report — strip the
+  // cosmetic stderr so the summary stays clean.
+  if (name === 'Unused Dependencies' && result.stderr) {
+    result.stderr = result.stderr
+      .replace(
+        /error: Registry URL must be http:\/\/ or https:\/\/\nReceived: "cloudflare:[^"]*"\n?/g,
+        '',
+      )
+      .trim();
+  }
+
+  const finalResult: CommandResult = {
+    ...baseResult,
+    ...result,
+    duration,
+    logLines: log,
+  };
+
+  // 7. Determine success (using custom logic if provided)
+  if (isSuccess) {
+    const raw = isSuccess(result, runMode);
+    const { success, warning } =
+      typeof raw === 'boolean' ? { success: raw, warning: undefined } : raw;
+
+    if (!success && finalResult.exitCode === 0) {
+      finalResult.exitCode = 1;
+    }
+    if (success && finalResult.exitCode !== 0) {
+      // Preserve stderr in stdout for the summary when the tool errored but isSuccess normalized it
+      if (finalResult.stderr && !finalResult.stdout) {
+        finalResult.stdout = finalResult.stderr;
+      }
+      finalResult.exitCode = 0;
+    }
+    if (warning) {
+      finalResult.warning = warning;
+    }
+  }
+
+  // 8. Rewrite the displayed output — after isSuccess has read the tool's own.
+  if (transformOutput) {
+    finalResult.stdout = transformOutput(finalResult);
+  }
+
+  log.push(UI.formatCheckResult(finalResult, uiMode));
+
+  return finalResult;
+}
+
+/**
+ * Handles the specific logic required for git pre-commit hooks, primarily re-staging
+ * files that were modified by auto-fixers (like Biome).
+ * Returns false if re-staging failed (should fail the commit).
+ */
+async function handleHuskyReStaging(ctx: AppContext): Promise<boolean> {
+  // We only need to re-stage if auto-fixing was enabled.
+  if (ctx.noFix) return true;
+
+  // If no files were staged initially, there's nothing to re-stage.
+  if (ctx.stagedFiles.length === 0) return true;
+
+  UI.log(`\n${c.bold(c.cyan('✨ Husky: Checking for modifications by fixers...'))}`);
+
+  try {
+    const { stdout: gitStatus } = await Shell.exec(['git', 'status', '--porcelain'], {
+      cwd: ctx.rootDir,
+    });
+
+    // Identify files modified by fixers after staging.
+    // Porcelain format: XY path — X=index status, Y=working tree status.
+    // We want files where X is staged (not ' ' or '?') and Y='M' (modified since staging).
+    const stagedSet = new Set(ctx.stagedFiles);
+    const modifiedStagedFiles = gitStatus
+      .split('\n')
+      .filter((line) => line.length > 3 && line[1] === 'M' && line[0] !== ' ' && line[0] !== '?')
+      .map((line) => line.substring(3).trim())
+      // Only re-stage files that were originally staged — avoid pulling in unrelated changes
+      .filter((file) => stagedSet.has(file));
+
+    if (modifiedStagedFiles.length > 0) {
+      UI.log(c.yellow(`   Re-staging ${modifiedStagedFiles.length} files modified by fixers...`));
+
+      const cmd = ['git', 'add', ...modifiedStagedFiles];
+      const addResult = await Shell.exec(cmd, { cwd: ctx.rootDir });
+
+      let cmdStr = cmd.join(' ');
+      if (cmdStr.length > 100) {
+        cmdStr = `${cmdStr.substring(0, 97)}...`;
+      }
+      UI.log(c.dim(`     $ ${cmdStr}`));
+
+      if (addResult.exitCode !== 0) {
+        UI.log(c.red(`   ✗ Failed to re-stage files (exit ${addResult.exitCode}).`));
+        if (addResult.stderr) UI.log(c.red(`     ${addResult.stderr}`));
+        return false;
+      }
+
+      UI.log(c.green('   ✓ Successfully re-staged files.'));
+    } else {
+      UI.log(c.green('   ✓ No staged files were modified by fixers.'));
+    }
+
+    return true;
+  } catch (error: unknown) {
+    UI.log(c.red('🛑 Error during Husky hook file management. Fixes might not be staged.'));
+    UI.printError(error);
+    return false;
+  }
+}
+
+async function main() {
+  const args = parseArgs(process.argv.slice(2));
+  if (!args) process.exit(0);
+
+  // Initialize context
+  const appContext: AppContext = {
+    ...args,
+    rootDir: ROOT_DIR,
+    stagedFiles: [],
+  };
+
+  // If in husky mode, populate staged files early for optimized command generation.
+  if (appContext.isHuskyHook) {
+    appContext.stagedFiles = await Shell.getStagedFiles(ROOT_DIR);
+  }
+
+  // If it's a husky hook and nothing is staged, we can exit early.
+  if (appContext.isHuskyHook && appContext.stagedFiles.length === 0) {
+    UI.log(c.green('\nNo files staged. Skipping pre-commit checks.'));
+    process.exit(0);
+  }
+
+  UI.printHeader(appContext);
+
+  // Run checks concurrently, buffering output per check
+  const totalStart = performance.now();
+  const checkPromises = ALL_CHECKS.map((check) => runCheck(check, appContext));
+  const settledResults = await Promise.allSettled(checkPromises);
+  const totalDuration = Math.round(performance.now() - totalStart);
+
+  // Collect results, then flush buffered output in definition order (no interleaving)
+  const results: CommandResult[] = settledResults.map((res, index) => {
+    if (res.status === 'fulfilled') {
+      return res.value;
+    }
+    const checkName = ALL_CHECKS[index]?.name || 'Unknown';
+    return {
+      checkName,
+      exitCode: 1,
+      stdout: '',
+      stderr: `Check runner failed: ${String(res.reason)}`,
+      duration: 0,
+      skipped: false,
+      logLines: [`${c.bold(c.red('❌'))} ${c.yellow(checkName)} ${c.red('runner crashed')}`],
+    };
+  });
+
+  for (const result of results) {
+    UI.flushCheckLog(result);
+  }
+
+  // If running in Husky hook, manage file staging.
+  // We do this BEFORE summarizing success, so that even if checks failed, partial fixes are staged.
+  let reStagingOk = true;
+  if (appContext.isHuskyHook) {
+    reStagingOk = await handleHuskyReStaging(appContext);
+  }
+
+  const overallSuccess = UI.printSummary(results, appContext) && reStagingOk;
+
+  UI.printFooter(overallSuccess, totalDuration);
+  process.exit(overallSuccess ? 0 : 1);
+}
+
+// Entry point
+main().catch((error) => {
+  UI.printError(error);
+  process.exit(1);
+});

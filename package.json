@@ -1,0 +1,100 @@
+{
+  "name": "@cyanheads/elevation-mcp-server",
+  "version": "0.1.0",
+  "mcpName": "io.github.cyanheads/elevation-mcp-server",
+  "description": "Terrain analysis over elevation data: route ascent/descent profiles, bounding-box elevation grids, line-of-sight clearance, and US 3DEP point elevation.",
+  "author": "Casey Hand <casey@caseyjhand.com> (https://caseyjhand.com)",
+  "funding": [
+    {
+      "type": "github",
+      "url": "https://github.com/sponsors/cyanheads"
+    },
+    {
+      "type": "buy_me_a_coffee",
+      "url": "https://www.buymeacoffee.com/cyanheads"
+    }
+  ],
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "elevation-mcp-server": "dist/index.js"
+  },
+  "files": [
+    "changelog/",
+    "dist/",
+    "!dist/*.mcpb",
+    "README.md",
+    "LICENSE",
+    "CLAUDE.md",
+    "AGENTS.md",
+    "Dockerfile",
+    "server.json"
+  ],
+  "scripts": {
+    "build": "bun run scripts/build.ts",
+    "rebuild": "bun run scripts/clean.ts && bun run scripts/build.ts",
+    "clean": "bun run scripts/clean.ts",
+    "devcheck": "bun run scripts/devcheck.ts",
+    "audit:fix": "bun audit fix",
+    "audit:refresh": "rm -f bun.lock && bun install && bun audit",
+    "tree": "bun run scripts/tree.ts",
+    "list-skills": "bun run scripts/list-skills.ts",
+    "format": "biome check --write .",
+    "format:unsafe": "biome check --write --unsafe .",
+    "lint:mcp": "bun run scripts/lint-mcp.ts",
+    "lint:packaging": "bun run scripts/lint-packaging.ts",
+    "bundle": "bun run build && npx -y @anthropic-ai/mcpb pack . dist/elevation-mcp-server.mcpb && bun run scripts/clean-mcpb.ts dist/elevation-mcp-server.mcpb",
+    "changelog:build": "bun run scripts/build-changelog.ts",
+    "changelog:check": "bun run scripts/build-changelog.ts --check",
+    "release:github": "bun run scripts/release-github.ts",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "start": "node dist/index.js",
+    "start:stdio": "MCP_TRANSPORT_TYPE=stdio node dist/index.js",
+    "start:http": "MCP_TRANSPORT_TYPE=http node dist/index.js"
+  },
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "elevation",
+    "terrain",
+    "geospatial",
+    "usgs-3dep"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cyanheads/elevation-mcp-server.git"
+  },
+  "homepage": "https://github.com/cyanheads/elevation-mcp-server#readme",
+  "bugs": {
+    "url": "https://github.com/cyanheads/elevation-mcp-server/issues"
+  },
+  "license": "Apache-2.0",
+  "packageManager": "bun@1.4.2",
+  "engines": {
+    "bun": ">=1.4.0",
+    "node": ">=24.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@cyanheads/mcp-ts-core": "^0.13.10",
+    "pino-pretty": "^13.1.3",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.14",
+    "@socketsecurity/bun-security-scanner": "^1.1.3",
+    "@types/node": "26.6.3",
+    "@vitest/coverage-istanbul": "5.0.2",
+    "depcheck": "^1.4.7",
+    "fast-check": "^4.10.2",
+    "ignore": "^7.0.10",
+    "tsc-alias": "^1.9.5",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.2"
+  }
+}
