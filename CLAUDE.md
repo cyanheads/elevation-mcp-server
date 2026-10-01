@@ -123,7 +123,7 @@ Conventions this surface holds to, and that a new tool inherits:
 - **Shared inputs live in `tools/shared/inputs.ts`.** `PointSchema` for every coordinate, `SourceSchema` on every tool, `blankAsUnset` around every optional numeric, boolean, and enum input so a form client's blank reaches the default, and `boundedArray` for point lists so an oversized paste fails with one `too_big` issue.
 - **Attribution is required enrichment.** Each tool declares `notice` (optional) then `attribution` (required, rendered as the `Sources:` trailer), and writes `attribution` immediately after the sampler resolves, before any `ctx.fail` or notice branch, so every success path carries it. Notice fragments are joined, in the order `docs/design.md` lists them, into one `ctx.enrich.notice()` call.
 - **Error contracts are inline per tool.** The six service reasons carry `thrownBy: 'service'` and a recovery naming the tool itself; handler reasons (`degenerate_path`, `no_coverage`, `invalid_bbox`, `too_many_cells`, `same_endpoints`, `sightline_too_long`, `endpoint_no_data`) go through `ctx.fail`.
-- **Absent stays absent.** A point or sample without data omits `elevation_m`, `dataset`, and `resolution_m`; grid cells use `null` to keep matrix positions. Nothing is coerced to 0. Upstream-authored text reaches output in one field, `acquisition_date`, and `format()` renders it only through `inlineText()`.
+- **Absent stays absent.** A point or sample without data omits `elevation_m`, `dataset`, and `resolution_m`; grid cells use `null` to keep matrix positions. Nothing is coerced to 0. Upstream-authored text reaches output in one field, `acquisition_date`, kept only in `M/D/YYYY` form, and `format()` renders it only through `inlineText()`.
 - **Geometry is pure.** `src/services/elevation/geometry.ts` does no I/O and reports degenerate inputs as values (`kind: 'degenerate'`, `kind: 'endpoint_no_data'`) that each tool maps to its own reason.
 - **`docs/design.md` is the spec.** Tool contracts, notice fragments, recovery strings, and the design decisions behind them live there; keep it in step when a contract changes.
 
@@ -221,7 +221,7 @@ Handlers receive a unified `ctx` object. Key properties:
 
 | Property | Description |
 |:---------|:------------|
-| `ctx.log` | Request-scoped logger — `.debug()`, `.info()`, `.notice()`, `.warning()`, `.error()`. Auto-correlates requestId, traceId, tenantId. Dual-sink: Pino **and** `notifications/message` to the client, so treat it as client-visible. The sampler logs one `info` record per call; provider clients log upstream miss and error bodies at `debug` (first 200 characters), never returning them. |
+| `ctx.log` | Request-scoped logger — `.debug()`, `.info()`, `.notice()`, `.warning()`, `.error()`. Auto-correlates requestId, traceId, tenantId. Dual-sink: Pino **and** `notifications/message` to the client, so treat it as client-visible. The sampler logs one `info` record per call. Provider clients keep upstream text out of it: `logUpstreamText()` gives `ctx.log` a miss or error body's byte length and kind at `debug`, and sends its first 200 characters only to the process-only `logger` (`@cyanheads/mcp-ts-core/utils`), correlated through `ctx`. |
 | `ctx.enrich` | Success-path agent context — `ctx.enrich(...)` or `.notice()` / `.total()` / `.echo()` / `.truncated()`. Reaches `structuredContent` and `content[]`; lands only when the definition declares an `enrichment` block (no-op otherwise). Every tool here writes `attribution` and, when a condition applies, one joined `notice`. |
 | `ctx.fail` | Typed throw against the tool's own `errors[]` reason union. See Errors. |
 | `ctx.signal` | `AbortSignal` for cancellation. The sampler links it to its own `AbortController`, which also aborts outstanding upstream requests on the first fatal error. |
@@ -299,13 +299,13 @@ src/
       geometry.ts                       # Pure math: distance, resampling, grid nodes, line of sight
       attribution.ts                    # attributionFor() and the Mapzen attribution block
       types.ts                          # Dataset, SourceMode, Sample, provider-call types
-      units.ts                          # Earth radius, plausibility floor, rounding, meters → feet
+      units.ts                          # Earth radius, plausibility floor and ceiling, rounding, meters → feet
     usgs-epqs/
       usgs-epqs-client.ts               # USGS EPQS client and its pacer
     opentopodata/
       opentopodata-client.ts            # Open Topo Data client, request pacer, daily pacer
     shared/
-      http-attempt.ts                   # Timed fetch attempt and bounded body read for both clients
+      http-attempt.ts                   # Timed fetch attempt, bounded body read, and upstream-text logging for both clients
 ```
 
 ---

@@ -20,9 +20,10 @@ import type {
   ProviderCallOptions,
   ProviderLookup,
 } from '@/services/elevation/types.js';
-import { ELEVATION_FLOOR_M, METERS_PER_DEGREE, roundTo } from '@/services/elevation/units.js';
+import { isPlausibleElevation, METERS_PER_DEGREE, roundTo } from '@/services/elevation/units.js';
 import {
   discardBody,
+  logUpstreamText,
   readBoundedText,
   runTimedAttempt,
   USER_AGENT,
@@ -33,7 +34,8 @@ const SERVICE = 'USGS EPQS';
 const ATTEMPT_TIMEOUT_MS = 10_000;
 /** Largest observed body is 240 bytes. */
 const MAX_BODY_BYTES = 16 * 1024;
-const LOG_EXCERPT_CHARS = 200;
+/** The `M/D/YYYY` form EPQS writes acquisition dates in; live values include a zero month or day. */
+const ACQUISITION_DATE_FORM = /^\d{1,2}\/\d{1,2}\/\d{4}$/;
 
 /** EPQS requests the production pacer keeps in flight, across every call. */
 export const EPQS_MAX_CONCURRENT = 6;
@@ -161,9 +163,11 @@ export class UsgsEpqsClient {
 
 /**
  * Classifies a 200 body. A hit is a JSON object whose `value` is a finite
- * number or numeric string at or above the plausibility floor; anything else
- * (EPQS's plain-text miss bodies, the no-data sentinel, a body over the
- * ceiling) is a miss. Miss text is logged at debug and never returned.
+ * number or numeric string within the plausibility floor and ceiling; anything
+ * else (EPQS's plain-text miss bodies, the no-data sentinel, an implausible
+ * value, a body over the read ceiling) is a miss. Miss text is never returned,
+ * and reaches only the process log. A hit keeps its acquisition date only in
+ * `M/D/YYYY` form.
  */
 function classifyEpqsBody(body: string | undefined, point: LatLon, ctx: Context): ProviderLookup {
   if (body === undefined) {
@@ -174,16 +178,20 @@ function classifyEpqsBody(body: string | undefined, point: LatLon, ctx: Context)
     });
     return { kind: 'miss' };
   }
-  const parsed = parseJsonObject(body);
-  const elevation = parsed ? readNumeric(parsed.value) : undefined;
-  if (parsed === undefined || elevation === undefined || elevation < ELEVATION_FLOOR_M) {
-    ctx.log.debug('EPQS returned no value for the point', {
+  const miss = (kind: string): ProviderLookup => {
+    logUpstreamText(ctx, 'EPQS returned no value for the point', {
       lat: point.lat,
       lon: point.lon,
-      body: body.slice(0, LOG_EXCERPT_CHARS),
+      kind,
+      text: body,
     });
     return { kind: 'miss' };
-  }
+  };
+  const parsed = parseJsonObject(body);
+  if (parsed === undefined) return miss('not_a_json_object');
+  const elevation = readNumeric(parsed.value);
+  if (elevation === undefined) return miss('no_numeric_value');
+  if (!isPlausibleElevation(elevation)) return miss('outside_plausible_range');
 
   const resolution =
     typeof parsed.resolution === 'number' ? normalizeResolution(parsed.resolution) : undefined;
@@ -200,7 +208,7 @@ function classifyEpqsBody(body: string | undefined, point: LatLon, ctx: Context)
     ...(resolution !== undefined && { resolution_m: resolution }),
     ...(typeof rasterId === 'number' && Number.isInteger(rasterId) && { raster_id: rasterId }),
     ...(typeof acquisitionDate === 'string' &&
-      acquisitionDate !== '' && { acquisition_date: acquisitionDate }),
+      ACQUISITION_DATE_FORM.test(acquisitionDate) && { acquisition_date: acquisitionDate }),
   };
   return { kind: 'hit', value };
 }

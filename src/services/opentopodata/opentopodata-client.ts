@@ -28,9 +28,10 @@ import type {
   ProviderCallOptions,
   ProviderLookup,
 } from '@/services/elevation/types.js';
-import { ELEVATION_FLOOR_M } from '@/services/elevation/units.js';
+import { isPlausibleElevation } from '@/services/elevation/units.js';
 import {
   discardBody,
+  logUpstreamText,
   readBoundedText,
   runTimedAttempt,
   USER_AGENT,
@@ -43,7 +44,6 @@ const ATTEMPT_TIMEOUT_MS = 15_000;
 /** Observed 14.9 KB at 100 locations. */
 const MAX_BODY_BYTES = 64 * 1024;
 const MAX_ERROR_BODY_BYTES = 4 * 1024;
-const LOG_EXCERPT_CHARS = 200;
 /** A location echo farther than this from the sent coordinate marks the response mis-shaped. */
 const LOCATION_TOLERANCE_DEG = 1e-6;
 /** SRTM GL1's ground spacing: 1 arc-second of latitude. */
@@ -276,11 +276,12 @@ export class OpenTopoDataClient {
 /**
  * Parses a 200: `{ status: 'OK', results: [{ dataset, elevation, location: { lat, lng } }] }`,
  * one result per sent location in order, each echoing its coordinate. A null
- * (or sub-floor) elevation is a miss, and its `dataset` is ignored: the
- * upstream names the last dataset whose bounds held the point even when that
- * dataset had no value. A hit naming a dataset this server did not request
- * means a misconfigured instance (`opentopodata_config_rejected`, not
- * retried); anything else is mis-shaped and retried as transient.
+ * or implausible (below the floor, above the ceiling) elevation is a miss, and
+ * its `dataset` is ignored: the upstream names the last dataset whose bounds
+ * held the point even when that dataset had no value. A hit naming a dataset
+ * this server did not request means a misconfigured instance
+ * (`opentopodata_config_rejected`, not retried); anything else is mis-shaped
+ * and retried as transient. Upstream text reaches only the process log.
  */
 function parseResults(
   text: string | undefined,
@@ -293,14 +294,16 @@ function parseResults(
   try {
     parsed = JSON.parse(text);
   } catch (error) {
-    ctx.log.debug('Open Topo Data returned an unparseable 200 body', {
-      body: text.slice(0, LOG_EXCERPT_CHARS),
+    logUpstreamText(ctx, 'Open Topo Data returned an unparseable 200 body', {
+      kind: 'not_json',
+      text,
     });
     throw unavailable(`${SERVICE} returned a response that is not JSON.`, error);
   }
   if (!isRecord(parsed) || parsed.status !== 'OK' || !Array.isArray(parsed.results)) {
-    ctx.log.debug('Open Topo Data returned a 200 without status OK and a results array', {
-      body: text.slice(0, LOG_EXCERPT_CHARS),
+    logUpstreamText(ctx, 'Open Topo Data returned a 200 without status OK and a results array', {
+      kind: 'no_ok_status_or_results',
+      text,
     });
     throw unavailable(`${SERVICE} returned a response without an OK status and a results list.`);
   }
@@ -318,19 +321,20 @@ function parseResults(
       );
     }
     const { dataset, elevation } = result;
-    if (elevation === null || (typeof elevation === 'number' && elevation < ELEVATION_FLOOR_M)) {
+    if (elevation === null || (typeof elevation === 'number' && !isPlausibleElevation(elevation))) {
       return { kind: 'miss' };
     }
-    if (typeof elevation !== 'number' || !Number.isFinite(elevation)) {
+    if (typeof elevation !== 'number') {
       throw unavailable(`${SERVICE} result ${index} carries a non-numeric elevation.`);
     }
     if (typeof dataset !== 'string') {
       throw unavailable(`${SERVICE} result ${index} does not name the dataset that answered it.`);
     }
     if (dataset !== 'srtm30m' && dataset !== 'mapzen') {
-      ctx.log.debug('Open Topo Data named a dataset that was not requested', {
+      logUpstreamText(ctx, 'Open Topo Data named a dataset that was not requested', {
         index,
-        dataset: dataset.slice(0, LOG_EXCERPT_CHARS),
+        kind: 'unrequested_dataset',
+        text: dataset,
       });
       throw configRejected(
         200,
@@ -363,7 +367,8 @@ function echoesLocation(echo: unknown, sent: { lat: string; lon: string }): bool
 /**
  * A 400 names either an instance limitation the operator must fix (a missing
  * dataset, a location cap under 100) or a request this server built wrongly.
- * Neither is retried; the upstream text is logged at debug, never returned.
+ * Neither is retried; the upstream text reaches only the process log, never
+ * the caller.
  */
 async function classifyBadRequest(response: Response, ctx: Context): Promise<McpError> {
   const text = await readBoundedText(response, MAX_ERROR_BODY_BYTES);
@@ -376,15 +381,13 @@ async function classifyBadRequest(response: Response, ctx: Context): Promise<Mcp
       // An unparseable 400 falls through to the request-built-wrongly branch.
     }
   }
-  ctx.log.debug('Open Topo Data answered HTTP 400', {
-    error: (message ?? text ?? '').slice(0, LOG_EXCERPT_CHARS),
+  const instanceLimitation =
+    message !== undefined && CONFIG_REJECTION_PREFIXES.some((prefix) => message.startsWith(prefix));
+  logUpstreamText(ctx, 'Open Topo Data answered HTTP 400', {
+    kind: instanceLimitation ? 'config_rejection' : 'request_rejected',
+    text: message ?? text ?? '',
   });
-  if (
-    message !== undefined &&
-    CONFIG_REJECTION_PREFIXES.some((prefix) => message.startsWith(prefix))
-  ) {
-    return configRejected(400);
-  }
+  if (instanceLimitation) return configRejected(400);
   return internalError(
     `${SERVICE} rejected a request this server built (HTTP 400); this is a server bug.`,
     {

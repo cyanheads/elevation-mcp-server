@@ -776,6 +776,47 @@ describe('every declared reason on the wire', () => {
   });
 });
 
+describe('implausible upstream elevations', () => {
+  it.each([
+    ['a string 1e307', '1e307'],
+    ['just over the 9,000 m ceiling', '9000.01'],
+  ])('reads a 3DEP value of %s as no data under source usgs_3dep', async (_name, value) => {
+    useUpstreams({ epqs: () => epqsResponse(epqsHitBody({ value })) });
+    const result = await run({ points: [SEATTLE], source: 'usgs_3dep' });
+
+    expect(result.isError).toBeUndefined();
+    expect(structured(result).points).toEqual([
+      { lat: SEATTLE.lat, lon: SEATTLE.lon, status: 'no_data' },
+    ]);
+  });
+
+  it('falls back to Open Topo Data under source auto, as for any 3DEP miss', async () => {
+    useUpstreams({
+      epqs: () => epqsResponse(epqsHitBody({ value: '1e307' })),
+      otd: otdByPoint(() => ({ dataset: 'srtm30m', elevation: 59 })),
+    });
+    const result = await run({ points: [SEATTLE] });
+
+    expect(result.isError).toBeUndefined();
+    expect(structured(result).points?.[0]).toMatchObject({
+      status: 'ok',
+      dataset: 'srtm30m',
+      elevation_m: 59,
+    });
+  });
+
+  it('reads an Open Topo Data value of 1e307 as no data, not a hit', async () => {
+    useUpstreams({ otd: otdByPoint(() => ({ dataset: 'srtm30m', elevation: 1e307 })) });
+    const result = await run({ points: [LONDON], source: 'opentopodata' });
+
+    expect(result.isError).toBeUndefined();
+    expect(structured(result).points).toEqual([
+      { lat: LONDON.lat, lon: LONDON.lon, status: 'no_data' },
+    ]);
+    expect(structured(result).points_with_data).toBe(0);
+  });
+});
+
 describe('format()', () => {
   const fullOutput = () =>
     getPointsTool.output.parse({
@@ -870,16 +911,29 @@ describe('format()', () => {
     const hostileDate =
       '6/5/2021\r\n| injected | row |\r\n# Heading\n[link](https://evil.test) <b>x</b>';
 
-    it('keeps the date verbatim in structuredContent and neutralizes it in the table', async () => {
+    it('omits a date not in M/D/YYYY form from both surfaces and keeps the elevation', async () => {
       useUpstreams({
         epqs: () => epqsResponse(epqsHitBody({ acquisitionDate: hostileDate })),
       });
       const result = await run({ points: [SEATTLE] });
 
-      expect(structured(result).points?.[0]?.acquisition_date).toBe(hostileDate);
-      const table = contentText(result).split('**Sources:**')[0] ?? '';
+      const [point] = structured(result).points ?? [];
+      expect(point).toMatchObject({ status: 'ok', dataset: 'usgs_3dep', elevation_m: 52.38 });
+      expect(point).not.toHaveProperty('acquisition_date');
+      const everything = JSON.stringify(result.structuredContent) + contentText(result);
+      expect(everything).not.toContain('injected');
+      expect(everything).not.toContain('evil.test');
+      expect(contentText(result)).toContain('| 102575 | — |');
+    });
+
+    it('neutralizes link, HTML, and table syntax and line breaks in the table', () => {
+      const output = fullOutput();
+      const [first] = output.points;
+      if (first) first.acquisition_date = hostileDate;
+      const table = textOf(output);
       const rows = table.split('\n').filter((line) => /^\| \d+ /.test(line));
-      expect(rows).toHaveLength(1);
+
+      expect(rows).toHaveLength(3);
       const row = rows[0] ?? '';
       expect(row).not.toMatch(/[\r]/);
       expect(row).toContain('6/5/2021 \\| injected \\| row \\| # Heading ');
@@ -888,16 +942,10 @@ describe('format()', () => {
       expect(table.split('\n').filter((line) => line.startsWith('| injected'))).toHaveLength(0);
     });
 
-    it('keeps one table row per point however many breaks the dates carry', async () => {
-      useUpstreams({
-        epqs: epqsByPoint((point) =>
-          epqsResponse(epqsHitBody({ acquisitionDate: `a\r\nb\nc\r${point.lat}` })),
-        ),
-      });
-      const result = await run({
-        points: [SEATTLE, { lat: 40, lon: -105 }, { lat: 41, lon: -105 }],
-      });
-      const rows = contentText(result)
+    it('keeps one table row per point however many breaks the dates carry', () => {
+      const output = fullOutput();
+      for (const point of output.points) point.acquisition_date = `a\r\nb\nc\r${point.lat}`;
+      const rows = textOf(output)
         .split('\n')
         .filter((line) => /^\| \d+ /.test(line));
       expect(rows).toHaveLength(3);

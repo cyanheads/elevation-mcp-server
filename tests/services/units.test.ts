@@ -6,7 +6,9 @@
 import { describe, expect, it } from 'vitest';
 import {
   EARTH_RADIUS_M,
+  ELEVATION_CEILING_M,
   ELEVATION_FLOOR_M,
+  isPlausibleElevation,
   METERS_PER_DEGREE,
   METERS_PER_FOOT,
   metersToFeet,
@@ -29,6 +31,30 @@ describe('constants', () => {
     expect(ELEVATION_FLOOR_M).toBeLessThan(-10_935);
     expect(ELEVATION_FLOOR_M).toBeGreaterThan(-32_768);
     expect(ELEVATION_FLOOR_M).toBeGreaterThan(-1_000_000);
+  });
+
+  it('puts the plausibility ceiling above the highest summit (Everest, 8,849 m)', () => {
+    expect(ELEVATION_CEILING_M).toBe(9_000);
+    expect(ELEVATION_CEILING_M).toBeGreaterThan(8_849);
+  });
+});
+
+describe('isPlausibleElevation', () => {
+  it.each([
+    ['the floor', -12_000, true],
+    ['a deep sea-floor depth', -10_935, true],
+    ['sea level', 0, true],
+    ['Everest', 8_849, true],
+    ['the ceiling', 9_000, true],
+    ['just under the floor', -12_000.01, false],
+    ['just over the ceiling', 9_000.01, false],
+    ['a value whose rounding overflows', 1e307, false],
+    ['the EPQS no-data sentinel', -1_000_000, false],
+    ['positive infinity', Number.POSITIVE_INFINITY, false],
+    ['negative infinity', Number.NEGATIVE_INFINITY, false],
+    ['NaN', Number.NaN, false],
+  ])('%s (%d) → %s', (_name, value, expected) => {
+    expect(isPlausibleElevation(value)).toBe(expected);
   });
 });
 
