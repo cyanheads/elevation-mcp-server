@@ -49,6 +49,8 @@ const LOCATION_TOLERANCE_DEG = 1e-6;
 /** SRTM GL1's ground spacing: 1 arc-second of latitude. */
 const SRTM_RESOLUTION_M = 30.9;
 const DAILY_REQUEST_LIMIT = 1_000;
+/** The longest `Retry-After`, in seconds, reported to a caller: the daily window's length. */
+const MAX_RETRY_AFTER_S = 86_400;
 /** 400 `error` texts that mean the instance lacks a dataset or caps locations under 100. */
 const CONFIG_REJECTION_PREFIXES = ['Dataset', 'No valid dataset', 'Too many locations'];
 
@@ -102,18 +104,22 @@ interface DailyLimitRefusal {
 /**
  * Queries Open Topo Data for up to 100 points per call (the sampler chunks).
  *
- * `lookup` resolves to one hit or miss per point, in order. It rejects with:
+ * `lookup` resolves to one hit or miss per point, in order. Redirects are not
+ * followed. It rejects with:
  * - `ServiceUnavailable`, `reason: 'opentopodata_unavailable'` after the ladder
  *   (5xx, network error, per-attempt timeout, unreadable or mis-shaped 200,
- *   whose problem the message names);
+ *   whose problem the message names), or at once, `retryable: false`, for a
+ *   2xx other than 200, a redirect from the public instance, or another
+ *   status retrying cannot fix;
  * - `RateLimited`, `reason: 'opentopodata_rate_limited'` when 429s outlast the
  *   ladder or carry a `Retry-After` above 8 s (`data.retryAfter` in seconds
- *   when the header was sent and parses);
+ *   when the header was sent and parses to at most a day);
  * - `RateLimited`, `reason: 'opentopodata_daily_limit'`, `retryable: false`,
  *   `data.retryAfter` (seconds) when the daily pacer refuses; nothing is sent;
  * - `ConfigurationError`, `reason: 'opentopodata_config_rejected'` on 401, 403,
- *   404, a 400 naming a missing dataset or a location cap under 100, or a 200
- *   naming a dataset this server did not request;
+ *   404, a redirect from a self-hosted instance, a 400 naming a missing dataset
+ *   or a location cap under 100, or a 200 naming a dataset this server did not
+ *   request;
  * - `InternalError` on any other 400 (a request this server built wrongly);
  * - the retry deadline or a request-pacer shed, unchanged, for the sampler;
  * - the abort reason, unchanged, when `signal` was aborted.
@@ -123,15 +129,16 @@ export class OpenTopoDataClient {
   readonly #endpoint: string;
   readonly #fetch: typeof globalThis.fetch;
   readonly #pacer: Pacer;
+  readonly #publicInstance: boolean;
 
   constructor(options: OpenTopoDataClientOptions) {
     const baseUrl = options.baseUrl.replace(/\/+$/, '');
     this.#endpoint = `${baseUrl}/v1/${DATASET_STACK}`;
     this.#fetch = options.fetch;
+    this.#publicInstance = isPublicOpenTopoDataInstance(baseUrl);
     this.#pacer = options.pacer ?? createOpenTopoDataPacer(baseUrl);
     this.#dailyPacer =
-      options.dailyPacer ??
-      (isPublicOpenTopoDataInstance(baseUrl) ? createOpenTopoDataDailyPacer() : undefined);
+      options.dailyPacer ?? (this.#publicInstance ? createOpenTopoDataDailyPacer() : undefined);
   }
 
   /** Looks up 1–100 points in one request; coordinates are sent at 6 decimals. */
@@ -225,12 +232,29 @@ export class OpenTopoDataClient {
             'User-Agent': USER_AGENT,
           },
           body,
+          redirect: 'manual',
           signal: attemptSignal,
         });
         const { status } = response;
         if (status === 200) {
           const text = await readBoundedText(response, MAX_BODY_BYTES);
           return parseResults(text, sent, ctx);
+        }
+        if (status < 300) {
+          await discardBody(response);
+          throw unexpectedStatus(status, `${SERVICE} answered HTTP ${status} instead of 200.`);
+        }
+        if (status < 400) {
+          await discardBody(response);
+          throw this.#publicInstance
+            ? unexpectedStatus(
+                status,
+                `${SERVICE} answered HTTP ${status}, a redirect this server does not follow.`,
+              )
+            : configRejected(
+                status,
+                `The ${SERVICE} instance answered HTTP ${status}, a redirect this server does not follow; set OPENTOPODATA_BASE_URL to the URL the instance redirects to.`,
+              );
         }
         if (status === 400) throw await classifyBadRequest(response, ctx);
         if (status === 401 || status === 403 || status === 404) {
@@ -407,14 +431,31 @@ function unavailable(message: string, cause?: unknown): McpError {
 }
 
 /**
+ * A status this server does not read as an answer: a 2xx other than 200, or a
+ * redirect from the public instance. Retrying cannot change it, so it is not
+ * retried; the message is this server's own, never the reason phrase.
+ */
+function unexpectedStatus(status: number, message: string): McpError {
+  return serviceUnavailable(message, {
+    reason: 'opentopodata_unavailable',
+    retryable: false,
+    status,
+    detail: message,
+  });
+}
+
+/**
  * A `Retry-After` header value in whole seconds: delta-seconds as given, an
- * HTTP-date as the seconds left until it (0 once past), anything else undefined.
+ * HTTP-date as the seconds left until it (0 once past). Anything else, and any
+ * value over a day (a digit run long enough to parse as `Infinity` included),
+ * is undefined.
  */
 function retryAfterSeconds(value: unknown): number | undefined {
   if (typeof value !== 'string') return;
-  if (/^\d+$/.test(value)) return Number(value);
-  const at = Date.parse(value);
-  return Number.isNaN(at) ? undefined : Math.max(0, Math.ceil((at - Date.now()) / 1_000));
+  const seconds = /^\d+$/.test(value)
+    ? Number(value)
+    : Math.max(0, Math.ceil((Date.parse(value) - Date.now()) / 1_000));
+  return seconds <= MAX_RETRY_AFTER_S ? seconds : undefined;
 }
 
 /**
@@ -422,8 +463,9 @@ function retryAfterSeconds(value: unknown): number | undefined {
  * a request-pacer shed, and errors already carrying their final reason (config
  * rejection, daily limit, the built-wrongly 400) pass through; a 429 becomes
  * `opentopodata_rate_limited`; everything else `opentopodata_unavailable`. The
- * final error's data is built fresh, so the wrapper's `operation` and the
- * ladder's `detail` never reach the caller.
+ * final error's data is built fresh, so the wrapper's `operation`, the
+ * ladder's `detail`, and any upstream reason phrase or header never reach the
+ * caller.
  */
 function toOpenTopoDataError(error: unknown, signal: AbortSignal): unknown {
   if (signal.aborted) return error;
@@ -437,7 +479,7 @@ function toOpenTopoDataError(error: unknown, signal: AbortSignal): unknown {
     ) {
       return error;
     }
-    if (error.code === JsonRpcErrorCode.InternalError) return error;
+    if (error.code === JsonRpcErrorCode.InternalError && error.data?.status === 400) return error;
     if (error.code === JsonRpcErrorCode.RateLimited) {
       const retryAfter = retryAfterSeconds(error.data?.retryAfter);
       return rateLimited(

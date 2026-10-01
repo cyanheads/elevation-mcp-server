@@ -52,12 +52,24 @@ describe.each(TOOLS.map((tool) => ({ name: tool.name, tool })))(
       expect(recovery).toContain('a missing or misconfigured srtm30m or mapzen dataset');
     });
 
+    it('opentopodata_config_rejected covers a self-hosted instance that redirects', () => {
+      const { when, recovery } = entry(tool, 'opentopodata_config_rejected');
+      expect(when).toContain('a redirect from a self-hosted instance');
+      expect(recovery).toContain('a wrong or redirecting URL');
+    });
+
     it('sampling_deadline_exceeded recovery covers a budget spent waiting on either provider', () => {
       const { recovery } = entry(tool, 'sampling_deadline_exceeded');
       expect(recovery).toContain('waiting on USGS 3DEP');
       expect(recovery).toContain('waiting on Open Topo Data, retry in a minute');
       expect(recovery).toContain(`re-call ${name} with fewer`);
       expect(recovery).toContain('source usgs_3dep');
+    });
+
+    it('sampling_deadline_exceeded covers a call refused because other calls hold 3DEP, naming retryAfter', () => {
+      const { when, recovery } = entry(tool, 'sampling_deadline_exceeded');
+      expect(when).toContain('data.retryAfter');
+      expect(recovery).toContain('when the error carries retryAfter');
     });
   },
 );

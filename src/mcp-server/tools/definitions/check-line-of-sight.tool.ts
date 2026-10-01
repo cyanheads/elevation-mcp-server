@@ -220,18 +220,18 @@ export const checkLineOfSightTool = tool('elevation_check_line_of_sight', {
     {
       reason: 'opentopodata_config_rejected',
       code: JsonRpcErrorCode.ConfigurationError,
-      when: 'The Open Topo Data instance answered 401, 403, or 404, a 400 naming a dataset it lacks or a location limit below 100, or a 200 naming a dataset this server did not request.',
+      when: 'The Open Topo Data instance answered 401, 403, or 404, a redirect from a self-hosted instance, a 400 naming a dataset it lacks or a location limit below 100, or a 200 naming a dataset this server did not request.',
       recovery:
-        "The Open Topo Data instance at OPENTOPODATA_BASE_URL cannot serve this server's requests (wrong URL, a missing or misconfigured srtm30m or mapzen dataset, or a per-request location limit under 100), which the server operator must fix. Meanwhile re-call elevation_check_line_of_sight with source usgs_3dep for lines inside USGS 3DEP coverage.",
+        "The Open Topo Data instance at OPENTOPODATA_BASE_URL cannot serve this server's requests (a wrong or redirecting URL, a missing or misconfigured srtm30m or mapzen dataset, or a per-request location limit under 100), which the server operator must fix. Meanwhile re-call elevation_check_line_of_sight with source usgs_3dep for lines inside USGS 3DEP coverage.",
       retryable: false,
       thrownBy: 'service',
     },
     {
       reason: 'sampling_deadline_exceeded',
       code: JsonRpcErrorCode.Timeout,
-      when: "The call's 45 s sampling budget ran out (a retry deadline, or a wait in either provider's request queue).",
+      when: "The call's 45 s sampling budget ran out (a retry deadline, or a wait in either provider's request queue), or the USGS 3DEP lookups other calls had queued, plus this call's, would not drain within the calls' budgets, so it sent none and data.retryAfter gives the seconds until the queued lookups drain.",
       recovery:
-        'If the budget ran out waiting on USGS 3DEP, re-call elevation_check_line_of_sight with fewer samples, since each 3DEP sample is its own upstream request; if it ran out waiting on Open Topo Data, retry in a minute, or re-call it with source usgs_3dep for a line inside USGS 3DEP coverage.',
+        'If the budget ran out waiting on USGS 3DEP, re-call elevation_check_line_of_sight with fewer samples, since each 3DEP sample is its own upstream request, or, when the error carries retryAfter (other calls held 3DEP), retry it after that many seconds; if it ran out waiting on Open Topo Data, retry in a minute, or re-call it with source usgs_3dep for a line inside USGS 3DEP coverage.',
       thrownBy: 'service',
     },
   ],

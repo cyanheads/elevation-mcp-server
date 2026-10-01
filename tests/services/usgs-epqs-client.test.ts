@@ -345,6 +345,29 @@ describe('UsgsEpqsClient non-200 statuses', () => {
     expect(mcpData(error)).toMatchObject({ reason: 'usgs_unavailable', retryable: false });
   });
 
+  it.each([301, 302, 303, 307, 308])(
+    'does not follow a %i: usgs_unavailable, unretried, Location never named',
+    async (status) => {
+      const { client, http } = setup(
+        () =>
+          new Response(null, {
+            status,
+            headers: { location: 'https://elsewhere.example.test/v1/json?steer=agent' },
+          }),
+      );
+      const error = await client.lookup(POINT, providerOptions()).catch((e: unknown) => e);
+
+      expect(http.calls).toHaveLength(1);
+      expect(http.calls[0]!.request.redirect).toBe('manual');
+      expect((error as McpError).message).toBe(`USGS 3DEP (EPQS) failed with HTTP ${status}.`);
+      expect(mcpData(error)).toStrictEqual({
+        reason: 'usgs_unavailable',
+        retryable: false,
+        status,
+      });
+    },
+  );
+
   it('does not retry a 501 (the upstream declares the method absent)', async () => {
     const { client, http } = setup(() => epqsResponse('', 501));
     const error = await client.lookup(POINT, providerOptions()).catch((e: unknown) => e);

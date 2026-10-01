@@ -1,8 +1,9 @@
 /**
  * @fileoverview Samples terrain elevation at a list of points: dedupes,
  * routes each point to USGS 3DEP or Open Topo Data, falls back on coverage
- * misses only, bounds each call's outstanding 3DEP lookups, enforces the
- * per-call budget, and normalizes failures. Also
+ * misses only, admits a call's 3DEP lookups only when the process-wide 3DEP
+ * queue can drain them in time, bounds each call's outstanding 3DEP lookups,
+ * enforces the per-call budget, and normalizes failures. Also
  * holds the init/accessor/dispose lifecycle for the elevation services.
  * @module services/elevation/elevation-sampler
  */
@@ -11,7 +12,11 @@ import type { Context } from '@cyanheads/mcp-ts-core';
 import { McpError, timeout } from '@cyanheads/mcp-ts-core/errors';
 import type { ServerConfig } from '@/config/server-config.js';
 import { OpenTopoDataClient } from '@/services/opentopodata/opentopodata-client.js';
-import { EPQS_MAX_CONCURRENT, UsgsEpqsClient } from '@/services/usgs-epqs/usgs-epqs-client.js';
+import {
+  EPQS_MAX_CONCURRENT,
+  EPQS_STARTS_PER_SECOND,
+  UsgsEpqsClient,
+} from '@/services/usgs-epqs/usgs-epqs-client.js';
 import type { Dataset, ElevationValue, LatLon, Sample, SourceMode } from './types.js';
 import { roundTo } from './units.js';
 
@@ -29,6 +34,16 @@ export const OPENTOPODATA_CHUNK_SIZE = 100;
  * still fills every slot.
  */
 const EPQS_CALL_WINDOW = EPQS_MAX_CONCURRENT;
+
+/** The EPQS pacer's spacing between starts, shared by every call. */
+const EPQS_MS_PER_LOOKUP = 1_000 / EPQS_STARTS_PER_SECOND;
+
+/** One call's 3DEP phase, as the admission check sees it. */
+interface EpqsLoad {
+  deadlineAt: number;
+  /** Lookups the call has yet to settle, submitted or not. */
+  outstanding: number;
+}
 
 /** An upstream provider, named by the `source` value that selects it alone. */
 type Provider = Exclude<SourceMode, 'auto'>;
@@ -90,13 +105,18 @@ export interface ElevationSamplerOptions {
  *   unchanged (`data.reason` set);
  * - `Timeout`, `reason: 'sampling_deadline_exceeded'` when the budget ran out
  *   in a retry ladder or a provider queue (cause chained), with `data.provider`
- *   (`usgs_3dep` or `opentopodata`) naming the phase it ran out in;
+ *   (`usgs_3dep` or `opentopodata`) naming the phase it ran out in; or, before
+ *   any request is sent, when the 3DEP lookups other calls have outstanding
+ *   plus this call's would not drain by the earliest deadline among them
+ *   (`data.provider` `usgs_3dep`, `data.retryAfter` in seconds, no cause);
  * - `InternalError` for an Open Topo Data 400 this server provoked;
  * - the abort reason, unchanged, when `ctx.signal` was aborted.
  */
 export class ElevationSampler {
   readonly #budgetMs: number;
   readonly #epqs: UsgsEpqsClient;
+  /** Every call in its 3DEP phase; one sampler serves the whole process. */
+  readonly #epqsLoads = new Set<EpqsLoad>();
   readonly #now: () => number;
   readonly #openTopoData: OpenTopoDataClient;
 
@@ -137,20 +157,25 @@ export class ElevationSampler {
           entry.needsOpenTopoData = true;
         }
       }
-      await forEachWindowed(epqsEntries, EPQS_CALL_WINDOW, async (entry) => {
-        const result = await this.#epqs.lookup(entry.point, {
-          ctx,
-          signal,
-          budgetMs: remainingMs(),
+      const load = this.#admitEpqsLoad(epqsEntries.length, deadlineAt, startedAt);
+      try {
+        await forEachWindowed(epqsEntries, EPQS_CALL_WINDOW, async (entry) => {
+          const result = await this.#epqs
+            .lookup(entry.point, { ctx, signal, budgetMs: remainingMs() })
+            .finally(() => {
+              load.outstanding--;
+            });
+          if (result.kind === 'hit') {
+            stats.epqsHits++;
+            entry.answer = result.value;
+          } else {
+            stats.epqsMisses++;
+            if (mode === 'auto') entry.needsOpenTopoData = true;
+          }
         });
-        if (result.kind === 'hit') {
-          stats.epqsHits++;
-          entry.answer = result.value;
-        } else {
-          stats.epqsMisses++;
-          if (mode === 'auto') entry.needsOpenTopoData = true;
-        }
-      });
+      } finally {
+        this.#epqsLoads.delete(load);
+      }
 
       // Phase 2: Open Topo Data for out-of-envelope points and 3DEP misses, in input order.
       const openTopoDataEntries = entries.filter((entry) => entry.needsOpenTopoData);
@@ -189,6 +214,48 @@ export class ElevationSampler {
       elapsedMs: this.#now() - startedAt,
     });
     return byInput.map(toSample);
+  }
+
+  /**
+   * Admits a call's 3DEP phase, or refuses it before it sends anything. The
+   * pacer starts lookups at one fixed rate for every call, so the lookups
+   * already outstanding plus this call's drain at that rate in any order. The
+   * call is admitted when that drain ends by the earliest deadline among the
+   * calls in their 3DEP phase and this one, or when it has no lookups or no
+   * other call is in its 3DEP phase.
+   */
+  #admitEpqsLoad(lookups: number, deadlineAt: number, startedAt: number): EpqsLoad {
+    let queued = 0;
+    let earliestDeadlineAt = deadlineAt;
+    for (const other of this.#epqsLoads) {
+      queued += other.outstanding;
+      earliestDeadlineAt = Math.min(earliestDeadlineAt, other.deadlineAt);
+    }
+    const drainMs = (queued + lookups) * EPQS_MS_PER_LOOKUP;
+    if (lookups > 0 && this.#epqsLoads.size > 0 && this.#now() + drainMs > earliestDeadlineAt) {
+      throw this.#epqsBusy(startedAt, lookups, queued, drainMs);
+    }
+    const load: EpqsLoad = { deadlineAt, outstanding: lookups };
+    this.#epqsLoads.add(load);
+    return load;
+  }
+
+  /**
+   * The refusal: `retryAfter` is the time the lookups already queued take to
+   * drain, after which this call would be the only one in its 3DEP phase.
+   */
+  #epqsBusy(startedAt: number, lookups: number, queued: number, drainMs: number): McpError {
+    const retryAfter = Math.max(1, Math.ceil((queued * EPQS_MS_PER_LOOKUP) / 1_000));
+    return timeout(
+      `USGS 3DEP lookups queued by other calls (${queued}) and this call's ${lookups} would take about ${Math.ceil(drainMs / 1_000)} s at ${EPQS_STARTS_PER_SECOND} a second, more than the calls involved have left of their ${this.#budgetMs / 1_000} s sampling budgets, so this call sent none. The queued lookups drain in about ${retryAfter} s.`,
+      {
+        reason: 'sampling_deadline_exceeded',
+        budgetMs: this.#budgetMs,
+        elapsedMs: this.#now() - startedAt,
+        provider: 'usgs_3dep',
+        retryAfter,
+      },
+    );
   }
 
   #deadlineExceeded(startedAt: number, provider: Provider, cause?: unknown): McpError {

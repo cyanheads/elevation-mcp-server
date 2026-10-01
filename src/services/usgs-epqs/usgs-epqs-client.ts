@@ -38,12 +38,15 @@ const LOG_EXCERPT_CHARS = 200;
 /** EPQS requests the production pacer keeps in flight, across every call. */
 export const EPQS_MAX_CONCURRENT = 6;
 
+/** EPQS requests the production pacer starts per second, across every call. */
+export const EPQS_STARTS_PER_SECOND = 10;
+
 /** Builds the production EPQS pacer: 6 in flight, 10 starts a second, 429 cooldown. */
 function createEpqsPacer(): Pacer {
   return createPacer({
     name: 'usgs-epqs',
     maxConcurrent: EPQS_MAX_CONCURRENT,
-    limits: [{ requests: 10, perMs: 1_000 }],
+    limits: [{ requests: EPQS_STARTS_PER_SECOND, perMs: 1_000 }],
     cooldown: { baseMs: 2_000, maxMs: 30_000 },
   });
 }
@@ -59,10 +62,11 @@ export interface UsgsEpqsClientOptions {
 /**
  * Queries EPQS for single points.
  *
- * `lookup` resolves to a hit or a miss. It rejects with:
+ * `lookup` resolves to a hit or a miss. Redirects are not followed. It rejects with:
  * - `ServiceUnavailable`, `data.reason: 'usgs_unavailable'` once the retry
  *   ladder fails (`data.status` when an HTTP status was seen, `data.retryable`
- *   false for a 4xx this server should never have provoked);
+ *   false for a 4xx this server should never have provoked, a redirect, or a
+ *   2xx other than 200);
  * - the `withRetry` deadline (`Timeout`, `reason: 'retry_deadline_exceeded'`) or
  *   a pacer shed (`RateLimited`, `reason: 'pacer_shed'`), unchanged, for the
  *   sampler to normalize;
@@ -136,6 +140,7 @@ export class UsgsEpqsClient {
       async (attemptSignal) => {
         const response = await fetchImpl(url, {
           headers: { Accept: 'application/json', 'User-Agent': USER_AGENT },
+          redirect: 'manual',
           signal: attemptSignal,
         });
         if (response.status !== 200) {

@@ -608,9 +608,9 @@ describe('ElevationSampler.sample: fail fast', () => {
 });
 
 describe('ElevationSampler.sample: 3DEP lookups per call', () => {
-  /** `count` distinct points inside the 3DEP envelope. */
-  const column = (count: number): LatLon[] =>
-    Array.from({ length: count }, (_, i) => ({ lat: 40 + i / 1_000, lon: -105 }));
+  /** `count` distinct points inside the 3DEP envelope, on the meridian `lon`. */
+  const column = (count: number, lon = -105): LatLon[] =>
+    Array.from({ length: count }, (_, i) => ({ lat: 40 + i / 1_000, lon }));
 
   it('keeps at most 6 lookups of one call outstanding, starting the next as one settles', async () => {
     let inFlight = 0;
@@ -690,6 +690,152 @@ describe('ElevationSampler.sample: 3DEP lookups per call', () => {
       } finally {
         epqs.dispose();
       }
+    });
+
+    it('answers the first of two simultaneous 250-point calls and refuses the second at once, sending nothing', async () => {
+      const http = createFetchMock([
+        epqsRoute(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 200));
+          return epqsResponse(epqsHitBody());
+        }),
+      ]);
+      const epqs = new UsgsEpqsClient({ fetch: http.fetch });
+      const sampler = new ElevationSampler({
+        epqs,
+        openTopoData: new OpenTopoDataClient({
+          baseUrl: OTD_PUBLIC_BASE_URL,
+          fetch: http.fetch,
+          pacer: permissivePacer(),
+          dailyPacer: permissivePacer(),
+        }),
+      });
+      try {
+        const first = sampler.sample(column(250), 'usgs_3dep', createMockContext());
+        first.catch(() => undefined);
+
+        const startedAt = Date.now();
+        const second = await settleWithFakeTimers(
+          sampler.sample(column(250, -104), 'usgs_3dep', createMockContext()),
+          { stepMs: 50 },
+        );
+        expect(second.status).toBe('rejected');
+        expect(Date.now() - startedAt).toBeLessThan(1_000);
+        const error = (second as PromiseRejectedResult).reason;
+        expect((error as McpError).code).toBe(JsonRpcErrorCode.Timeout);
+        expect(mcpData(error)).toMatchObject({
+          reason: 'sampling_deadline_exceeded',
+          provider: 'usgs_3dep',
+          retryAfter: 25,
+        });
+
+        const rest = await settleWithFakeTimers(first, { stepMs: 50 });
+        if (rest.status === 'rejected') throw rest.reason;
+        expect(rest.value.filter((sample) => sample.dataset === 'usgs_3dep')).toHaveLength(250);
+        expect(http.calls).toHaveLength(250);
+        expect(
+          http.calls.every(
+            (call) => new URL(call.request.url).searchParams.get('x') === '-105.000000',
+          ),
+        ).toBe(true);
+      } finally {
+        epqs.dispose();
+      }
+    });
+  });
+
+  describe('admission against the lookups other calls have queued', () => {
+    /** Starts a call whose lookups hang until it is cancelled, and waits for its first window. */
+    async function holdInFlight(sampler: ElevationSampler, count: number, sent: () => number) {
+      const controller = new AbortController();
+      const call = sampler.sample(
+        column(count),
+        'usgs_3dep',
+        createMockContext({ signal: controller.signal }),
+      );
+      call.catch(() => undefined);
+      await vi.waitFor(() => expect(sent()).toBe(6));
+      return () => controller.abort(new Error('test done'));
+    }
+
+    it("refuses a call whose lookups would carry the queue past an in-flight call's deadline, sending nothing", async () => {
+      let clock = 0;
+      const { callsTo, sampler } = harness({ now: () => clock, epqs: hangUntilAborted });
+      const release = await holdInFlight(sampler, 100, () => callsTo('epqs').length);
+      try {
+        clock = 30_000;
+        // 100 queued plus 60 more at 10 a second end at 46 s: past the in-flight
+        // call's 45 s deadline, though inside this call's own (75 s).
+        const error = await sampler
+          .sample(column(60, -104), 'usgs_3dep', createMockContext())
+          .catch((e: unknown) => e);
+
+        expect((error as McpError).code).toBe(JsonRpcErrorCode.Timeout);
+        expect(mcpData(error)).toEqual({
+          reason: 'sampling_deadline_exceeded',
+          budgetMs: 45_000,
+          elapsedMs: 0,
+          provider: 'usgs_3dep',
+          retryAfter: 10,
+        });
+        expect((error as McpError).message).toContain('this call sent none');
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        expect(callsTo('epqs')).toHaveLength(6);
+      } finally {
+        release();
+      }
+    });
+
+    it('admits a call whose lookups drain before every in-flight deadline', async () => {
+      let clock = 0;
+      const { callsTo, sampler } = harness({ now: () => clock, epqs: hangUntilAborted });
+      const release = await holdInFlight(sampler, 100, () => callsTo('epqs').length);
+      const controller = new AbortController();
+      try {
+        clock = 30_000;
+        // 100 queued plus 50 more end at exactly 45 s, the in-flight call's deadline.
+        const admitted = sampler.sample(
+          column(50, -104),
+          'usgs_3dep',
+          createMockContext({ signal: controller.signal }),
+        );
+        admitted.catch(() => undefined);
+        await vi.waitFor(() => expect(callsTo('epqs')).toHaveLength(12));
+      } finally {
+        controller.abort(new Error('test done'));
+        release();
+      }
+    });
+
+    it('always admits a call when no other call has lookups queued, even past its own budget', async () => {
+      const { callsTo, sampler } = harness({
+        budgetMs: 5_000,
+        epqs: () => epqsResponse(epqsHitBody()),
+      });
+      // 250 lookups project to 25 s at 10 a second, over this call's 5 s budget.
+      const samples = await sampler.sample(column(250), 'usgs_3dep', createMockContext());
+
+      expect(samples.filter((sample) => sample.dataset === 'usgs_3dep')).toHaveLength(250);
+      expect(callsTo('epqs')).toHaveLength(250);
+    });
+
+    it('releases a finished or failed call, so the next heavy call is admitted', async () => {
+      const { sampler } = harness({
+        epqs: epqsByPoint((point) =>
+          point.lon === -103
+            ? epqsResponse('{"message":"Forbidden"}', 403)
+            : epqsResponse(epqsHitBody()),
+        ),
+      });
+      const answered = await sampler.sample(column(250), 'usgs_3dep', createMockContext());
+      expect(answered).toHaveLength(250);
+
+      const failed = await sampler
+        .sample(column(250, -103), 'usgs_3dep', createMockContext())
+        .catch((e: unknown) => e);
+      expect(mcpData(failed)).toMatchObject({ reason: 'usgs_unavailable', status: 403 });
+
+      const after = await sampler.sample(column(250, -104), 'usgs_3dep', createMockContext());
+      expect(after.filter((sample) => sample.dataset === 'usgs_3dep')).toHaveLength(250);
     });
   });
 });
