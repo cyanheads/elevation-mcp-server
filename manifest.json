@@ -15,7 +15,8 @@
       "env": {
         "MCP_TRANSPORT_TYPE": "stdio",
         "MCP_AUTH_MODE": "none",
-        "NODE_ENV": "production"
+        "NODE_ENV": "production",
+        "OPENTOPODATA_BASE_URL": "${user_config.OPENTOPODATA_BASE_URL}"
       }
     }
   },
@@ -24,5 +25,13 @@
   },
   "tools_generated": true,
   "prompts_generated": true,
-  "user_config": {}
+  "user_config": {
+    "OPENTOPODATA_BASE_URL": {
+      "type": "string",
+      "title": "Open Topo Data base URL",
+      "description": "Base URL of a self-hosted Open Topo Data instance serving the srtm30m and mapzen datasets. Leave blank to use the public instance at https://api.opentopodata.org.",
+      "required": false,
+      "default": ""
+    }
+  }
 }

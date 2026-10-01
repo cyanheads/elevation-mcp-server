@@ -12,12 +12,21 @@
   "repository": "https://github.com/cyanheads/elevation-mcp-server",
   "license": "Apache-2.0",
   "keywords": ["mcp", "mcp-server", "model-context-protocol", "elevation", "terrain", "geospatial", "usgs-3dep"],
+  "userConfig": {
+    "OPENTOPODATA_BASE_URL": {
+      "type": "string",
+      "title": "Open Topo Data base URL",
+      "description": "Base URL of a self-hosted Open Topo Data instance serving the srtm30m and mapzen datasets. Leave blank to use the public instance at https://api.opentopodata.org.",
+      "default": ""
+    }
+  },
   "mcpServers": {
     "elevation-mcp-server": {
       "command": "npx",
       "args": ["-y", "@cyanheads/elevation-mcp-server"],
       "env": {
-        "MCP_TRANSPORT_TYPE": "stdio"
+        "MCP_TRANSPORT_TYPE": "stdio",
+        "OPENTOPODATA_BASE_URL": "${user_config.OPENTOPODATA_BASE_URL}"
       }
     }
   }

@@ -31,6 +31,13 @@
           "format": "string",
           "isRequired": false,
           "default": "info"
+        },
+        {
+          "name": "OPENTOPODATA_BASE_URL",
+          "description": "Base URL of the Open Topo Data instance used outside USGS 3DEP coverage. Defaults to the public instance, paced to its published limits; any other URL is treated as a self-hosted instance, which must serve the srtm30m and mapzen datasets and accept 100 locations per request.",
+          "format": "string",
+          "isRequired": false,
+          "default": "https://api.opentopodata.org"
         }
       ],
       "transport": {
@@ -88,6 +95,13 @@
           "format": "string",
           "isRequired": false,
           "default": "info"
+        },
+        {
+          "name": "OPENTOPODATA_BASE_URL",
+          "description": "Base URL of the Open Topo Data instance used outside USGS 3DEP coverage. Defaults to the public instance, paced to its published limits; any other URL is treated as a self-hosted instance, which must serve the srtm30m and mapzen datasets and accept 100 locations per request.",
+          "format": "string",
+          "isRequired": false,
+          "default": "https://api.opentopodata.org"
         }
       ],
       "transport": {
