@@ -1,7 +1,8 @@
 /**
  * @fileoverview Contract text shared by all four tools that must hold on every
  * deployment: `tools/list` advertises each `when`, so the Open Topo Data limit
- * texts must be true on a public and a self-hosted instance alike, and the
+ * texts must be true on a public and a self-hosted instance alike, the
+ * config-rejection text must cover every answer that maps to it, and the
  * deadline recovery must cover a budget spent waiting on either provider.
  * @module tests/tools/error-contracts.test
  */
@@ -27,6 +28,10 @@ describe.each(TOOLS.map((tool) => ({ name: tool.name, tool })))(
     it('opentopodata_rate_limited recovery holds for a public and a self-hosted instance', () => {
       const { recovery } = entry(tool, 'opentopodata_rate_limited');
       expect(recovery).toContain(
+        "Open Topo Data is refusing this server's requests as rate limited.",
+      );
+      expect(recovery, 'a single 429 asking for a long wait fails fast').not.toContain('kept');
+      expect(recovery).toContain(
         'The public instance allows 1 request per second and 1,000 per day',
       );
       expect(recovery).toContain('a self-hosted instance sets its own limits');
@@ -38,6 +43,13 @@ describe.each(TOOLS.map((tool) => ({ name: tool.name, tool })))(
       expect(entry(tool, 'opentopodata_daily_limit').when).toMatch(
         /^Only on the public Open Topo Data instance: /,
       );
+    });
+
+    it('opentopodata_config_rejected covers a 200 naming a dataset this server did not request', () => {
+      const { when, recovery } = entry(tool, 'opentopodata_config_rejected');
+      expect(when).toContain('or a 200 naming a dataset this server did not request');
+      expect(recovery).toContain('cannot serve this server');
+      expect(recovery).toContain('a missing or misconfigured srtm30m or mapzen dataset');
     });
 
     it('sampling_deadline_exceeded recovery covers a budget spent waiting on either provider', () => {

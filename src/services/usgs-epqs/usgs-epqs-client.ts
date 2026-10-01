@@ -36,7 +36,7 @@ const MAX_BODY_BYTES = 16 * 1024;
 const LOG_EXCERPT_CHARS = 200;
 
 /** Builds the production EPQS pacer: 6 in flight, 10 starts a second, 429 cooldown. */
-export function createEpqsPacer(): Pacer {
+function createEpqsPacer(): Pacer {
   return createPacer({
     name: 'usgs-epqs',
     maxConcurrent: 6,

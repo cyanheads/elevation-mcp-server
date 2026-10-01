@@ -191,21 +191,19 @@ export function profileStats(samples: readonly ProfileInput[]): ProfileStats {
     grades_pct: samples.map(() => undefined),
   };
   let previous: { distance_m: number; elevation_m: number } | undefined;
+  let highest = Number.NEGATIVE_INFINITY;
+  let lowest = Number.POSITIVE_INFINITY;
   samples.forEach((sample, index) => {
     const elevation = sample.elevation_m;
     if (elevation === undefined) return;
     stats.first_index ??= index;
     stats.last_index = index;
-    if (
-      stats.highest_index === undefined ||
-      elevation > (samples[stats.highest_index]?.elevation_m ?? elevation)
-    ) {
+    if (elevation > highest) {
+      highest = elevation;
       stats.highest_index = index;
     }
-    if (
-      stats.lowest_index === undefined ||
-      elevation < (samples[stats.lowest_index]?.elevation_m ?? elevation)
-    ) {
+    if (elevation < lowest) {
+      lowest = elevation;
       stats.lowest_index = index;
     }
     if (previous) {

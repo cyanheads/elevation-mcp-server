@@ -255,8 +255,7 @@ describe('OpenTopoDataClient mis-shaped 200 responses', () => {
   const WRONG_LOCATION =
     'Open Topo Data result 0 does not match the location sent at that position.';
   const NON_NUMERIC = 'Open Topo Data result 0 carries a non-numeric elevation.';
-  const WRONG_DATASET =
-    'The Open Topo Data instance answered with a dataset this server did not ask for (result 0; it requested srtm30m,mapzen).';
+  const NO_DATASET = 'Open Topo Data result 0 does not name the dataset that answered it.';
 
   it.each([
     [
@@ -325,14 +324,14 @@ describe('OpenTopoDataClient mis-shaped 200 responses', () => {
       NON_NUMERIC,
     ],
     [
-      'a dataset that was not requested',
-      JSON.stringify({ results: [result({ dataset: 'srtm90m' })], status: 'OK' }),
-      WRONG_DATASET,
-    ],
-    [
       'a hit with no dataset',
       JSON.stringify({ results: [result({ dataset: undefined })], status: 'OK' }),
-      WRONG_DATASET,
+      NO_DATASET,
+    ],
+    [
+      'a hit whose dataset is not a string',
+      JSON.stringify({ results: [result({ dataset: 7 })], status: 'OK' }),
+      NO_DATASET,
     ],
     ['a body that is not JSON', '<html>Bad gateway</html>', NOT_JSON],
     ['a JSON array', '[]', NOT_OK],
@@ -350,6 +349,24 @@ describe('OpenTopoDataClient mis-shaped 200 responses', () => {
       expect(dataOf(error)).toStrictEqual({ reason: 'opentopodata_unavailable', retryable: true });
     },
   );
+
+  it('maps a hit naming a dataset this server did not request to opentopodata_config_rejected, unretried', async () => {
+    const { client, http } = setup(() =>
+      otdResponse(JSON.stringify({ results: [result({ dataset: 'srtm90m' })], status: 'OK' })),
+    );
+    const error = await rejectionWithFakeTimers(client.lookup([SEATTLE], providerOptions()));
+
+    expect(http.calls).toHaveLength(1);
+    expect(codeOf(error)).toBe(JsonRpcErrorCode.ConfigurationError);
+    expect((error as McpError).message).toBe(
+      'The Open Topo Data instance answered with a dataset this server did not ask for (result 0; it requested srtm30m,mapzen); check how the instance at OPENTOPODATA_BASE_URL defines those datasets.',
+    );
+    expect(dataOf(error)).toStrictEqual({
+      reason: 'opentopodata_config_rejected',
+      retryable: false,
+      status: 200,
+    });
+  });
 
   it('never echoes the dataset name the upstream sent', async () => {
     const { client } = setup(() =>
@@ -540,12 +557,17 @@ describe('OpenTopoDataClient 429', () => {
     vi.useRealTimers();
   });
 
+  /** One wording for both ways out: 429s outlasting the retries, or a wait too long to take. */
+  const RATE_LIMITED =
+    "Open Topo Data rate-limited this server's requests (HTTP 429) for longer than this call's retries could wait.";
+
   it('retries a 429 without Retry-After, then fails opentopodata_rate_limited', async () => {
     const { client, http } = setup(() => otdResponse(OTD_429_BODY, 429));
     const error = await rejectionWithFakeTimers(client.lookup([SEATTLE], providerOptions()));
 
     expect(http.calls).toHaveLength(3);
     expect(codeOf(error)).toBe(JsonRpcErrorCode.RateLimited);
+    expect((error as McpError).message).toBe(RATE_LIMITED);
     expect(dataOf(error)).toMatchObject({ reason: 'opentopodata_rate_limited', retryable: true });
     expect(dataOf(error)).not.toHaveProperty('retryAfter');
     expect((error as McpError).cause).toBeInstanceOf(McpError);
@@ -571,6 +593,7 @@ describe('OpenTopoDataClient 429', () => {
 
     expect(http.calls).toHaveLength(1);
     expect(codeOf(error)).toBe(JsonRpcErrorCode.RateLimited);
+    expect((error as McpError).message).toBe(RATE_LIMITED);
     expect(dataOf(error)).toStrictEqual({
       reason: 'opentopodata_rate_limited',
       retryable: true,

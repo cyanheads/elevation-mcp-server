@@ -112,7 +112,8 @@ interface DailyLimitRefusal {
  * - `RateLimited`, `reason: 'opentopodata_daily_limit'`, `retryable: false`,
  *   `data.retryAfter` (seconds) when the daily pacer refuses; nothing is sent;
  * - `ConfigurationError`, `reason: 'opentopodata_config_rejected'` on 401, 403,
- *   404, or a 400 naming a missing dataset or a location cap under 100;
+ *   404, a 400 naming a missing dataset or a location cap under 100, or a 200
+ *   naming a dataset this server did not request;
  * - `InternalError` on any other 400 (a request this server built wrongly);
  * - the retry deadline or a request-pacer shed, unchanged, for the sampler;
  * - the abort reason, unchanged, when `signal` was aborted.
@@ -253,7 +254,9 @@ export class OpenTopoDataClient {
  * one result per sent location in order, each echoing its coordinate. A null
  * (or sub-floor) elevation is a miss, and its `dataset` is ignored: the
  * upstream names the last dataset whose bounds held the point even when that
- * dataset had no value. Anything else is mis-shaped and retried as transient.
+ * dataset had no value. A hit naming a dataset this server did not request
+ * means a misconfigured instance (`opentopodata_config_rejected`, not
+ * retried); anything else is mis-shaped and retried as transient.
  */
 function parseResults(
   text: string | undefined,
@@ -297,13 +300,17 @@ function parseResults(
     if (typeof elevation !== 'number' || !Number.isFinite(elevation)) {
       throw unavailable(`${SERVICE} result ${index} carries a non-numeric elevation.`);
     }
+    if (typeof dataset !== 'string') {
+      throw unavailable(`${SERVICE} result ${index} does not name the dataset that answered it.`);
+    }
     if (dataset !== 'srtm30m' && dataset !== 'mapzen') {
       ctx.log.debug('Open Topo Data named a dataset that was not requested', {
         index,
-        dataset: String(dataset).slice(0, LOG_EXCERPT_CHARS),
+        dataset: dataset.slice(0, LOG_EXCERPT_CHARS),
       });
-      throw unavailable(
-        `The ${SERVICE} instance answered with a dataset this server did not ask for (result ${index}; it requested ${DATASET_STACK}).`,
+      throw configRejected(
+        200,
+        `The ${SERVICE} instance answered with a dataset this server did not ask for (result ${index}; it requested ${DATASET_STACK}); check how the instance at OPENTOPODATA_BASE_URL defines those datasets.`,
       );
     }
     const answered: Dataset = dataset;
@@ -363,11 +370,20 @@ async function classifyBadRequest(response: Response, ctx: Context): Promise<Mcp
   );
 }
 
-function configRejected(status: number): McpError {
-  return configurationError(
-    `The ${SERVICE} instance refused this server's requests with HTTP ${status}; check OPENTOPODATA_BASE_URL and the instance's datasets and location limit.`,
-    { reason: 'opentopodata_config_rejected', retryable: false, status },
-  );
+/**
+ * The instance cannot serve this server's requests: it refused them (400, 401,
+ * 403, 404), or it answered 200 from a dataset this server did not request.
+ * Only the operator can fix either, so neither is retried.
+ */
+function configRejected(
+  status: number,
+  message = `The ${SERVICE} instance refused this server's requests with HTTP ${status}; check OPENTOPODATA_BASE_URL and the instance's datasets and location limit.`,
+): McpError {
+  return configurationError(message, {
+    reason: 'opentopodata_config_rejected',
+    retryable: false,
+    status,
+  });
 }
 
 function dailyLimitError(retryAfter: number): McpError {
@@ -425,7 +441,7 @@ function toOpenTopoDataError(error: unknown, signal: AbortSignal): unknown {
     if (error.code === JsonRpcErrorCode.RateLimited) {
       const retryAfter = retryAfterSeconds(error.data?.retryAfter);
       return rateLimited(
-        `${SERVICE} kept answering HTTP 429 (rate limited).`,
+        `${SERVICE} rate-limited this server's requests (HTTP 429) for longer than this call's retries could wait.`,
         {
           reason: 'opentopodata_rate_limited',
           retryable: true,

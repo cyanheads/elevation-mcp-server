@@ -718,7 +718,7 @@ describe('notices', () => {
     ],
   ])('counts samples without data and agrees in number (%#)', async (values, expected) => {
     const { result } = await runRoute(values);
-    expect(structured(result).notice).toContain(expected);
+    expect(structured(result).notice).toBe(expected);
     expect(contentText(result)).toContain(`> ${expected}`);
   });
 
@@ -728,7 +728,7 @@ describe('notices', () => {
       otd: routeOtd([undefined, srtm(52), srtm(54), srtm(56), srtm(58)]),
     });
     const result = await run({ path: ROUTE, samples: 5 });
-    expect(structured(result).notice).toContain(
+    expect(structured(result).notice).toBe(
       'The route crosses the USGS 3DEP coverage edge (1 sample from USGS 3DEP, 4 from Open Topo Data), so ascent and descent mix 1–30 m lidar-derived values with 30 m SRTM-class values; re-call elevation_get_profile with source opentopodata for a profile from one provider. ' +
         'Samples are 55.6 m apart against a 1 m source; raise samples (up to 250) or split the route to capture more relief.',
     );
@@ -750,7 +750,7 @@ describe('notices', () => {
     ],
   ])('flags Mapzen sea-floor samples and agrees in number (%#)', async (values, expected) => {
     const { result } = await runRoute(values);
-    expect(structured(result).notice).toContain(expected);
+    expect(structured(result).notice).toBe(expected);
   });
 
   it.each([
@@ -781,7 +781,7 @@ describe('notices', () => {
       useUpstreams({ otd: otdByPoint(() => srtm(100)) });
       const result = await run({ path: longRoute(0.0009), samples: 100 });
       expect(structured(result).sample_interval_m).toBe(1);
-      expect(structured(result).notice).toContain(
+      expect(structured(result).notice).toBe(
         'Samples are 1 m apart, closer than the 30.9 m source resolution, so extra samples add no detail; re-call elevation_get_profile with fewer samples for a faster result.',
       );
     });
@@ -790,7 +790,7 @@ describe('notices', () => {
       useUpstreams({ otd: otdByPoint(() => srtm(100)) });
       const result = await run({ path: longRoute(3), samples: 100 });
       expect(structured(result).sample_interval_m).toBe(3369.5);
-      expect(structured(result).notice).toContain(
+      expect(structured(result).notice).toBe(
         'Samples are 3369.5 m apart against a 30.9 m source; raise samples (up to 250) or split the route to capture more relief.',
       );
     });
@@ -826,7 +826,7 @@ describe('notices', () => {
       });
       const result = await run({ path: ROUTE, samples: 5, source: 'usgs_3dep' });
       expect(structured(result).sample_interval_m).toBe(55.6);
-      expect(structured(result).notice).toContain(
+      expect(structured(result).notice).toBe(
         'Samples are 55.6 m apart against a 1 m source; raise samples (up to 250) or split the route to capture more relief.',
       );
     });

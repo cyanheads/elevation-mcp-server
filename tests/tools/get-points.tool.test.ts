@@ -504,7 +504,7 @@ describe('notices', () => {
     useUpstreams({ epqs: () => epqsResponse(EPQS_MISS_TEXTS.emptyGeometry) });
     const points = Array.from({ length: count }, (_v, i) => ({ lat: 40 + i, lon: -100 }));
     const result = await run({ points, source: 'usgs_3dep' });
-    expect(structured(result).notice).toContain(expected);
+    expect(structured(result).notice).toBe(expected);
   });
 
   it.each([
@@ -522,7 +522,7 @@ describe('notices', () => {
     useUpstreams({ otd: otdByPoint(() => mapzen(null)) });
     const points = Array.from({ length: count }, (_v, i) => ({ lat: 80 + i * 0.1, lon: 100 }));
     const result = await run({ points, source: 'opentopodata' });
-    expect(structured(result).notice).toContain(expected);
+    expect(structured(result).notice).toBe(expected);
   });
 
   it.each([
@@ -538,7 +538,7 @@ describe('notices', () => {
     useUpstreams({ otd: otdByPoint(() => mapzen(-4389)) });
     const points = Array.from({ length: count }, (_v, i) => ({ lat: 30 + i, lon: -140 }));
     const result = await run({ points, source: 'opentopodata' });
-    expect(structured(result).notice).toContain(expected);
+    expect(structured(result).notice).toBe(expected);
     expect(contentText(result)).toContain(`> ${expected}`);
   });
 
@@ -561,7 +561,7 @@ describe('notices', () => {
   it('warns when 3DEP and Open Topo Data both answered, with counts', async () => {
     useUpstreams({ epqs: seattleFromUsgs, otd: otdByPoint(() => srtm(18)) });
     const result = await run({ points: [SEATTLE, LONDON, { lat: 48, lon: 2 }] });
-    expect(structured(result).notice).toContain(
+    expect(structured(result).notice).toBe(
       'Values come from USGS 3DEP (1 point, lidar-derived bare earth at 1–30 m) and Open Topo Data (2 points, SRTM and Mapzen at about 30 m); compare elevations across the two with care, or re-call elevation_get_points with source opentopodata to take every value from Open Topo Data.',
     );
   });

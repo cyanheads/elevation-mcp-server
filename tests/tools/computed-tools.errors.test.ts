@@ -157,9 +157,8 @@ describe.each(SPECS)('$label service failures on the wire', ({ tool, input }) =>
     expect(JSON.stringify(error)).not.toContain('gateway');
   });
 
-  it('opentopodata_unavailable: a dataset name that was not requested, never echoed', async () => {
-    vi.useFakeTimers();
-    useUpstreams({
+  it('opentopodata_config_rejected: a dataset name that was not requested, unretried and never echoed', async () => {
+    const http = useUpstreams({
       otd: async (request) => {
         const points = parseSentLocations(await request.text());
         return otdResponse(
@@ -170,18 +169,20 @@ describe.each(SPECS)('$label service failures on the wire', ({ tool, input }) =>
         );
       },
     });
-    const result = await settled(run('opentopodata'));
+    const result = await run('opentopodata');
     const error = expectDeclaredError(
       tool,
       result,
-      'opentopodata_unavailable',
-      JsonRpcErrorCode.ServiceUnavailable,
+      'opentopodata_config_rejected',
+      JsonRpcErrorCode.ConfigurationError,
     );
+    expect(http.calls).toHaveLength(1);
     expect(JSON.stringify(error)).not.toContain('Injected');
     expect(JSON.stringify(result.content)).not.toContain('Injected');
     expect(error.message).toBe(
-      'The Open Topo Data instance answered with a dataset this server did not ask for (result 0; it requested srtm30m,mapzen).',
+      'The Open Topo Data instance answered with a dataset this server did not ask for (result 0; it requested srtm30m,mapzen); check how the instance at OPENTOPODATA_BASE_URL defines those datasets.',
     );
+    expect(error.data).toMatchObject({ retryable: false, status: 200 });
     expect(error.data).not.toHaveProperty('detail');
     expect(error.data).not.toHaveProperty('operation');
   });

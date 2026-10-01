@@ -673,7 +673,7 @@ describe('notices', () => {
   ] as const)('counts cells without data and agrees in number (%#)', async (matrix, expected) => {
     useUpstreams({ otd: boxOtd(matrix as unknown as Matrix) });
     const result = await run(GRID_3X3);
-    expect(structured(result).notice).toContain(expected);
+    expect(structured(result).notice).toBe(expected);
     expect(contentText(result)).toContain(`> ${expected}`);
   });
 
@@ -696,7 +696,7 @@ describe('notices', () => {
       ]),
     });
     const result = await run(GRID_3X3);
-    expect(structured(result).notice).toContain(expected);
+    expect(structured(result).notice).toBe(expected);
   });
 
   it.each([
@@ -722,7 +722,7 @@ describe('notices', () => {
       otd: otdByPoint(() => srtm(52)),
     });
     const result = await run({ ...NA_BOX, rows: 2, cols: 2 });
-    expect(structured(result).notice).toContain(
+    expect(structured(result).notice).toBe(
       'The box spans the USGS 3DEP coverage edge (1 cell from USGS 3DEP, 3 from Open Topo Data); the highest and lowest points compare values of different resolution and surface model.',
     );
   });
@@ -739,7 +739,7 @@ describe('notices', () => {
       useUpstreams({ otd: otdByPoint(() => srtm(100)) });
       const result = await run(wide);
       expect(structured(result).row_spacing_m).toBe(55_597.5);
-      expect(structured(result).notice).toContain(
+      expect(structured(result).notice).toBe(
         'Nodes are about 55598 m apart against a 30.9 m source, so peaks and pits between nodes are missed; re-grid a smaller box around summary.highest to refine it.',
       );
     });

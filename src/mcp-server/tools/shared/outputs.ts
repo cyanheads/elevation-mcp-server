@@ -1,7 +1,7 @@
 /**
- * @fileoverview Output schemas and provenance summaries shared by the
- * computed tools (profile, grid, line of sight): per-dataset counts and the
- * range of source resolutions behind a result.
+ * @fileoverview Output schemas shared by the computed tools (profile, grid,
+ * line of sight), and the provenance summaries all four tools count from:
+ * per-dataset counts and the range of source resolutions behind a result.
  * @module mcp-server/tools/shared/outputs
  */
 

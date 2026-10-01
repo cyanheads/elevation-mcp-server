@@ -6,8 +6,9 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { inlineText } from '@/mcp-server/tools/shared/format.js';
+import { agree, countOf, inlineText } from '@/mcp-server/tools/shared/format.js';
 import { boundedArray, PointSchema, SourceSchema } from '@/mcp-server/tools/shared/inputs.js';
+import { providerSplit, summarizeProvenance } from '@/mcp-server/tools/shared/outputs.js';
 import { attributionFor } from '@/services/elevation/attribution.js';
 import { getElevationSampler } from '@/services/elevation/elevation-sampler.js';
 import {
@@ -120,7 +121,7 @@ export const getPointsTool = tool('elevation_get_points', {
       code: JsonRpcErrorCode.RateLimited,
       when: 'Open Topo Data kept answering HTTP 429 through the retries, or asked for a wait over 8 s.',
       recovery:
-        "Open Topo Data kept refusing this server's requests as rate limited. The public instance allows 1 request per second and 1,000 per day per network address, shared with any other client at that address; a self-hosted instance sets its own limits. Retry elevation_get_points in a few minutes, or re-call it with source usgs_3dep for points inside USGS 3DEP coverage.",
+        "Open Topo Data is refusing this server's requests as rate limited. The public instance allows 1 request per second and 1,000 per day per network address, shared with any other client at that address; a self-hosted instance sets its own limits. Retry elevation_get_points in a few minutes, or re-call it with source usgs_3dep for points inside USGS 3DEP coverage.",
       retryable: true,
       severity: 'warning',
       thrownBy: 'service',
@@ -138,9 +139,9 @@ export const getPointsTool = tool('elevation_get_points', {
     {
       reason: 'opentopodata_config_rejected',
       code: JsonRpcErrorCode.ConfigurationError,
-      when: 'The Open Topo Data instance answered 401, 403, or 404, or a 400 naming a dataset it lacks or a location limit below 100.',
+      when: 'The Open Topo Data instance answered 401, 403, or 404, a 400 naming a dataset it lacks or a location limit below 100, or a 200 naming a dataset this server did not request.',
       recovery:
-        "The Open Topo Data instance at OPENTOPODATA_BASE_URL refused this server's requests (wrong URL, missing srtm30m or mapzen dataset, or a per-request location limit under 100), which the server operator must fix. Meanwhile re-call elevation_get_points with source usgs_3dep for points inside USGS 3DEP coverage.",
+        "The Open Topo Data instance at OPENTOPODATA_BASE_URL cannot serve this server's requests (wrong URL, a missing or misconfigured srtm30m or mapzen dataset, or a per-request location limit under 100), which the server operator must fix. Meanwhile re-call elevation_get_points with source usgs_3dep for points inside USGS 3DEP coverage.",
       retryable: false,
       thrownBy: 'service',
     },
@@ -213,20 +214,13 @@ function toPointResult(sample: Sample): PointResult {
   };
 }
 
-/** "1 point" / "3 points". */
-const pointCount = (count: number) => (count === 1 ? '1 point' : `${count} points`);
-
-/** The word form agreeing with `count`. */
-const agree = (count: number, singular: string, plural: string) =>
-  count === 1 ? singular : plural;
-
 /** Joins the notice fragments that apply, in the design's listed order. */
 function buildNotice(points: readonly PointResult[], mode: SourceMode): string | undefined {
   const fragments: string[] = [];
   const noData = points.filter((point) => point.status === 'no_data').length;
   if (noData > 0 && mode === 'usgs_3dep') {
     fragments.push(
-      `${pointCount(noData)} ${agree(noData, 'has', 'have')} no USGS 3DEP data; re-call elevation_get_points with source auto to fill ${agree(noData, 'it', 'them')} from Open Topo Data.`,
+      `${countOf(noData, 'point')} ${agree(noData, 'has', 'have')} no USGS 3DEP data; re-call elevation_get_points with source auto to fill ${agree(noData, 'it', 'them')} from Open Topo Data.`,
     );
   } else if (noData > 0) {
     const reroute =
@@ -234,7 +228,7 @@ function buildNotice(points: readonly PointResult[], mode: SourceMode): string |
         ? ` Re-call elevation_get_points with source auto to query both providers for the ${agree(noData, 'point', 'points')} without data.`
         : '';
     fragments.push(
-      `${pointCount(noData)} returned no elevation from any queried dataset; the Open Topo Data instance this server uses has no coverage there.${reroute}`,
+      `${countOf(noData, 'point')} returned no elevation from any queried dataset; the Open Topo Data instance this server uses has no coverage there.${reroute}`,
     );
   }
   const seaFloor = points.filter(
@@ -242,16 +236,13 @@ function buildNotice(points: readonly PointResult[], mode: SourceMode): string |
   ).length;
   if (seaFloor > 0) {
     fragments.push(
-      `${pointCount(seaFloor)} ${agree(seaFloor, 'comes', 'come')} from Mapzen with values below 0 m; over open water these are sea-floor depths, not the water surface.`,
+      `${countOf(seaFloor, 'point')} ${agree(seaFloor, 'comes', 'come')} from Mapzen with values below 0 m; over open water these are sea-floor depths, not the water surface.`,
     );
   }
-  const fromUsgs = points.filter((point) => point.dataset === 'usgs_3dep').length;
-  const fromOpenTopoData = points.filter(
-    (point) => point.dataset === 'srtm30m' || point.dataset === 'mapzen',
-  ).length;
-  if (fromUsgs > 0 && fromOpenTopoData > 0) {
+  const { usgs, openTopoData } = providerSplit(summarizeProvenance(points).datasets_used);
+  if (usgs > 0 && openTopoData > 0) {
     fragments.push(
-      `Values come from USGS 3DEP (${pointCount(fromUsgs)}, lidar-derived bare earth at 1–30 m) and Open Topo Data (${pointCount(fromOpenTopoData)}, SRTM and Mapzen at about 30 m); compare elevations across the two with care, or re-call elevation_get_points with source opentopodata to take every value from Open Topo Data.`,
+      `Values come from USGS 3DEP (${countOf(usgs, 'point')}, lidar-derived bare earth at 1–30 m) and Open Topo Data (${countOf(openTopoData, 'point')}, SRTM and Mapzen at about 30 m); compare elevations across the two with care, or re-call elevation_get_points with source opentopodata to take every value from Open Topo Data.`,
     );
   }
   return fragments.length > 0 ? fragments.join(' ') : undefined;

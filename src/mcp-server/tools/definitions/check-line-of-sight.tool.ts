@@ -193,7 +193,7 @@ export const checkLineOfSightTool = tool('elevation_check_line_of_sight', {
       code: JsonRpcErrorCode.RateLimited,
       when: 'Open Topo Data kept answering HTTP 429 through the retries, or asked for a wait over 8 s.',
       recovery:
-        "Open Topo Data kept refusing this server's requests as rate limited. The public instance allows 1 request per second and 1,000 per day per network address, shared with any other client at that address; a self-hosted instance sets its own limits. Retry elevation_check_line_of_sight in a few minutes, or re-call it with source usgs_3dep for lines inside USGS 3DEP coverage.",
+        "Open Topo Data is refusing this server's requests as rate limited. The public instance allows 1 request per second and 1,000 per day per network address, shared with any other client at that address; a self-hosted instance sets its own limits. Retry elevation_check_line_of_sight in a few minutes, or re-call it with source usgs_3dep for lines inside USGS 3DEP coverage.",
       retryable: true,
       severity: 'warning',
       thrownBy: 'service',
@@ -211,9 +211,9 @@ export const checkLineOfSightTool = tool('elevation_check_line_of_sight', {
     {
       reason: 'opentopodata_config_rejected',
       code: JsonRpcErrorCode.ConfigurationError,
-      when: 'The Open Topo Data instance answered 401, 403, or 404, or a 400 naming a dataset it lacks or a location limit below 100.',
+      when: 'The Open Topo Data instance answered 401, 403, or 404, a 400 naming a dataset it lacks or a location limit below 100, or a 200 naming a dataset this server did not request.',
       recovery:
-        "The Open Topo Data instance at OPENTOPODATA_BASE_URL refused this server's requests (wrong URL, missing srtm30m or mapzen dataset, or a per-request location limit under 100), which the server operator must fix. Meanwhile re-call elevation_check_line_of_sight with source usgs_3dep for lines inside USGS 3DEP coverage.",
+        "The Open Topo Data instance at OPENTOPODATA_BASE_URL cannot serve this server's requests (wrong URL, a missing or misconfigured srtm30m or mapzen dataset, or a per-request location limit under 100), which the server operator must fix. Meanwhile re-call elevation_check_line_of_sight with source usgs_3dep for lines inside USGS 3DEP coverage.",
       retryable: false,
       thrownBy: 'service',
     },

@@ -508,7 +508,7 @@ describe('sea-surface case', () => {
     });
     expect(out.first_obstruction).toEqual(out.limiting_point);
     expect(out.obstructed_samples).toBe(1);
-    expect(structured(result).notice).toContain(
+    expect(structured(result).notice).toBe(
       '1 sample lies over open water, where Mapzen reports sea-floor depth, so clearance there is measured to the sea surface at 0 m.',
     );
     expect(out.attribution).toContain(MAPZEN_ATTRIBUTION);
@@ -819,17 +819,20 @@ describe('notices', () => {
   });
 
   it.each([
-    [[5, undefined, 5], '1 interior sample has no data and no sample with data blocks the line'],
+    [
+      [5, undefined, 5],
+      '1 interior sample has no data and no sample with data blocks the line, so the sightline cannot be confirmed clear; check the gap with elevation_get_profile on the same two points, or re-call elevation_check_line_of_sight with source auto to query both providers.',
+    ],
     [
       [undefined, undefined, 5],
-      '2 interior samples have no data and no sample with data blocks the line',
+      '2 interior samples have no data and no sample with data blocks the line, so the sightline cannot be confirmed clear; check the gap with elevation_get_profile on the same two points, or re-call elevation_check_line_of_sight with source auto to query both providers.',
     ],
   ])(
     'flags an indeterminate verdict, counting interior samples without data (%#)',
     async (interior, expected) => {
       const { result } = await kilometer(interior);
       expect(structured(result).verdict).toBe('indeterminate');
-      expect(structured(result).notice).toContain(expected);
+      expect(structured(result).notice).toBe(expected);
       expect(contentText(result)).toContain(`> ${expected}`);
     },
   );
@@ -842,7 +845,7 @@ describe('notices', () => {
   it('warns when a clear verdict has under 2 m of clearance, naming the distance', async () => {
     const { result } = await kilometer([9]);
     expect(structured(result)).toMatchObject({ verdict: 'clear', min_clearance_m: 1 });
-    expect(structured(result).notice).toContain(
+    expect(structured(result).notice).toBe(
       'Minimum clearance is under 2 m at 500 m from the observer; DEM vertical error, vegetation, and structures can close a margin that small.',
     );
   });
@@ -874,7 +877,7 @@ describe('notices', () => {
       otd: otdAnswers({ [at(47.001, -122)]: srtm(30) }),
     });
     const result = await run({ ...NA_LINE, samples: 3, earth_model: 'flat', observer_height_m: 0 });
-    expect(structured(result).notice).toContain(
+    expect(structured(result).notice).toBe(
       'The line crosses the USGS 3DEP coverage edge (2 samples from USGS 3DEP, 1 from Open Topo Data); clearances compare terrain of different resolution and surface model.',
     );
   });
