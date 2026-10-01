@@ -93,7 +93,7 @@ const toRoutePoint = (sample: LocatedSample & { elevation_m: number }) => ({
 export const getProfileTool = tool('elevation_get_profile', {
   title: 'Get Route Elevation Profile',
   description:
-    "Sample terrain elevation at evenly spaced points along a route (a polyline of 2–1,000 vertices) and summarize it. Returns total distance, cumulative ascent and descent, start, end, minimum, and maximum elevation, and the steepest climb and descent grades, plus the per-sample profile with each sample's dataset. Ascent and descent are summed between samples, so they depend on the sample spacing reported in the result: denser sampling captures more small climbs, down to the source's resolution. Over open water, Mapzen samples are sea-floor depths. Each USGS 3DEP sample is a separate upstream request, so up to 250 samples take roughly 10–30 seconds.",
+    "Sample terrain elevation at evenly spaced points along a route (a polyline of 2–1,000 vertices) and summarize it. Returns total distance, cumulative ascent and descent, start, end, minimum, and maximum elevation, and the steepest climb and descent grades, plus the per-sample profile with each sample's dataset unless include_samples is false. Ascent and descent are summed between samples, so they depend on the sample spacing reported in the result: denser sampling captures more small climbs, down to the source's resolution. Over open water, Mapzen samples are sea-floor depths. Each USGS 3DEP sample is a separate upstream request, so up to 250 samples take roughly 10–30 seconds.",
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   auth: ['tool:elevation_get_profile:read'],
   input: z.object({
@@ -101,14 +101,20 @@ export const getProfileTool = tool('elevation_get_profile', {
       'Route vertices in travel order, 2–1,000 {lat, lon} objects in decimal degrees (WGS84). Consecutive duplicate vertices are ignored.',
     ),
     samples: blankAsUnset(z.number().int().min(2).max(MAX_SAMPLES).default(100)).describe(
-      'Number of evenly spaced samples along the route, endpoints included (2–250, default 100). More samples catch more relief and take longer; spacing finer than the source resolution adds no detail.',
+      'Number of evenly spaced samples along the route, endpoints included (2–250, default 100). More samples catch more relief and take longer; spacing finer than the source resolution adds no detail. For a large count where only the summary matters, set include_samples to false.',
+    ),
+    include_samples: blankAsUnset(z.boolean().default(true)).describe(
+      'Return the per-sample profile (default true). false omits samples and the sample table; the summary, spacing, coverage counts, datasets, notices, and attribution are unchanged, still computed from every sample.',
     ),
     source: SourceSchema,
   }),
   output: z.object({
     samples: z
       .array(ProfileSampleSchema)
-      .describe('Every sample in route order, endpoints included.'),
+      .optional()
+      .describe(
+        'Every sample in route order, endpoints included. Absent when include_samples is false.',
+      ),
     summary: z
       .object({
         total_distance_m: z
@@ -300,7 +306,7 @@ export const getProfileTool = tool('elevation_get_profile', {
     const provenance = summarizeProvenance(sampled);
 
     const result = {
-      samples,
+      ...(input.include_samples && { samples }),
       summary: {
         total_distance_m: roundTo(route.total_distance_m, 1),
         start_elevation_m: first.elevation_m,
@@ -333,7 +339,7 @@ export const getProfileTool = tool('elevation_get_profile', {
       source_mode: input.source,
     };
 
-    const notice = buildNotice(result, input.samples);
+    const notice = buildNotice(result, samples, input.samples);
     if (notice) ctx.enrich.notice(notice);
     return result;
   },
@@ -349,15 +355,22 @@ export const getProfileTool = tool('elevation_get_profile', {
     const describePoint = (point: z.infer<typeof RoutePointSchema>) =>
       `${point.elevation_m} m at ${point.distance_m} m along the route (${point.lat}, ${point.lon})`;
 
-    const rows = result.samples.map((sample, index) => {
-      const resolution =
-        sample.resolution_m !== undefined
-          ? String(sample.resolution_m)
-          : sample.dataset === 'mapzen'
-            ? 'varies'
-            : '—';
-      return `| ${index + 1} | ${sample.distance_m} | ${sample.lat}, ${sample.lon} | ${sample.elevation_m ?? 'no data'} | ${sample.grade_pct ?? '—'} | ${sample.dataset ?? 'no data'} | ${resolution} |`;
-    });
+    const table = result.samples
+      ? [
+          '| # | Dist (m) | Lat, Lon | Elev (m) | Grade (%) | Dataset | Res (m) |',
+          '|--:|--:|:--|--:|--:|:--|--:|',
+          ...result.samples.map((sample, index) => {
+            const resolution =
+              sample.resolution_m !== undefined
+                ? String(sample.resolution_m)
+                : sample.dataset === 'mapzen'
+                  ? 'varies'
+                  : '—';
+            return `| ${index + 1} | ${sample.distance_m} | ${sample.lat}, ${sample.lon} | ${sample.elevation_m ?? 'no data'} | ${sample.grade_pct ?? '—'} | ${sample.dataset ?? 'no data'} | ${resolution} |`;
+          }),
+        ]
+      : ['Per-sample rows omitted (include_samples: false).'];
+    const sampleCount = result.samples_with_data + result.missing_samples;
     const text = [
       `## Route profile: ${summary.total_distance_m} m (${roundTo(summary.total_distance_m / 1_000, 2)} km)`,
       '',
@@ -367,13 +380,11 @@ export const getProfileTool = tool('elevation_get_profile', {
       `- **Highest point:** ${describePoint(summary.highest_point)}`,
       `- **Lowest point:** ${describePoint(summary.lowest_point)}`,
       `- **Grades:** ${grades}`,
-      `- **Sampling:** ${result.samples.length} samples, ${result.sample_interval_m} m apart, over ${result.vertices} route vertices`,
-      `- **Coverage:** ${result.samples_with_data} of ${result.samples.length} samples with data (${result.missing_samples} missing)`,
+      `- **Sampling:** ${sampleCount} samples, ${result.sample_interval_m} m apart, over ${result.vertices} route vertices`,
+      `- **Coverage:** ${result.samples_with_data} of ${sampleCount} samples with data (${result.missing_samples} missing)`,
       `- **Datasets:** ${formatDatasetsUsed(result.datasets_used)}; resolution ${formatResolutionRange(result.resolution_m_range)} (source: ${result.source_mode})`,
       '',
-      '| # | Dist (m) | Lat, Lon | Elev (m) | Grade (%) | Dataset | Res (m) |',
-      '|--:|--:|:--|--:|--:|:--|--:|',
-      ...rows,
+      ...table,
     ].join('\n');
     return [{ type: 'text', text }];
   },
@@ -384,14 +395,20 @@ interface NoticeInput {
   missing_samples: number;
   resolution_m_range?: z.infer<typeof ResolutionRangeSchema>;
   sample_interval_m: number;
-  samples: readonly ProfileSample[];
   source_mode: SourceMode;
 }
 
-/** Joins the notice fragments that apply, in the design's listed order. */
-function buildNotice(result: NoticeInput, requestedSamples: number): string | undefined {
+/**
+ * Joins the notice fragments that apply, in the design's listed order. Reads
+ * the full sample list, which the result omits under `include_samples: false`.
+ */
+function buildNotice(
+  result: NoticeInput,
+  samples: readonly ProfileSample[],
+  requestedSamples: number,
+): string | undefined {
   const fragments: string[] = [];
-  const total = result.samples.length;
+  const total = samples.length;
   const missing = result.missing_samples;
   if (missing > 0) {
     const reroute =
@@ -408,7 +425,7 @@ function buildNotice(result: NoticeInput, requestedSamples: number): string | un
       `The route crosses the USGS 3DEP coverage edge (${countOf(usgs, 'sample')} from USGS 3DEP, ${openTopoData} from Open Topo Data), so ascent and descent mix 1–30 m lidar-derived values with 30 m SRTM-class values; re-call elevation_get_profile with source opentopodata for a profile from one provider.`,
     );
   }
-  const seaFloor = result.samples.filter(
+  const seaFloor = samples.filter(
     (sample) => sample.dataset === 'mapzen' && (sample.elevation_m ?? 0) < 0,
   ).length;
   if (seaFloor > 0) {

@@ -108,16 +108,26 @@ describe('elevation_get_profile definition', () => {
 describe('input validation', () => {
   const parse = (input: unknown) => getProfileTool.input.safeParse(input);
 
-  it('defaults samples to 100 and source to auto', () => {
-    expect(parse({ path: ROUTE }).data).toEqual({ path: ROUTE, samples: 100, source: 'auto' });
-  });
-
-  it('reads blank samples and source as unset', () => {
-    expect(parse({ path: ROUTE, samples: '', source: '' }).data).toEqual({
+  it('defaults samples to 100, include_samples to true, and source to auto', () => {
+    expect(parse({ path: ROUTE }).data).toEqual({
       path: ROUTE,
       samples: 100,
+      include_samples: true,
       source: 'auto',
     });
+  });
+
+  it('reads blank samples, include_samples, and source as unset', () => {
+    expect(parse({ path: ROUTE, samples: '', include_samples: '', source: '' }).data).toEqual({
+      path: ROUTE,
+      samples: 100,
+      include_samples: true,
+      source: 'auto',
+    });
+  });
+
+  it('accepts include_samples false', () => {
+    expect(parse({ path: ROUTE, include_samples: false }).data?.include_samples).toBe(false);
   });
 
   it('accepts coordinate key aliases and strips extra keys on vertices', () => {
@@ -176,6 +186,8 @@ describe('input validation', () => {
     ['samples 2.5', { path: ROUTE, samples: 2.5 }],
     ['samples as a numeric string', { path: ROUTE, samples: '25' }],
     ['samples null', { path: ROUTE, samples: null }],
+    ['include_samples as a string', { path: ROUTE, include_samples: 'false' }],
+    ['include_samples null', { path: ROUTE, include_samples: null }],
     ['an unknown source', { path: ROUTE, source: 'srtm' }],
   ])('rejects %s', (_name, input) => {
     expect(parse(input).success).toBe(false);
@@ -196,6 +208,7 @@ describe('input validation', () => {
       ['a misspelled key', { path: [START, { lat: 1, lan: 2 }] }, 'path.1.lon'],
       ['samples 1', { path: ROUTE, samples: 1 }, 'samples'],
       ['samples 251', { path: ROUTE, samples: 251 }, 'samples'],
+      ['include_samples as a word', { path: ROUTE, include_samples: 'no' }, 'include_samples'],
       ['a bad source', { path: ROUTE, source: 'srtm' }, 'source'],
     ])('returns InvalidParams naming the field for %s', async (_name, input, path) => {
       const http = useUpstreams();
@@ -445,6 +458,55 @@ describe('success results', () => {
     expect(out).not.toHaveProperty('resolution_m_range');
     expect(out.samples[0]).not.toHaveProperty('resolution_m');
     expect(out.datasets_used).toEqual({ usgs_3dep: 0, srtm30m: 0, mapzen: 5 });
+  });
+});
+
+describe('include_samples: false', () => {
+  /** One gap and one Mapzen sea-floor sample, so the notice carries both count-driven fragments. */
+  const VALUES = [mapzen(-40), undefined, srtm(3), srtm(4), srtm(5)];
+
+  /** The same route with and without the samples, each against fresh services. */
+  const runBoth = async () => {
+    const full = await runRoute(VALUES);
+    disposeElevationServices();
+    const lean = await runRoute(VALUES, { include_samples: false });
+    return { full, lean };
+  };
+
+  it('drops samples and leaves every other structuredContent field, the notice, and the attribution unchanged', async () => {
+    const { full, lean } = await runBoth();
+    expect(lean.result.isError).toBeUndefined();
+    const { samples, ...rest } = structured(full.result);
+    expect(samples).toHaveLength(5);
+    expect(structured(lean.result)).not.toHaveProperty('samples');
+    expect(structured(lean.result)).toStrictEqual(rest);
+    expect(rest).toMatchObject({ samples_with_data: 4, missing_samples: 1 });
+    expect(rest.notice).toContain('1 of 5 samples has no data');
+    expect(rest.notice).toContain('1 sample comes from Mapzen with values below 0 m');
+    expect(rest.attribution).toContain(MAPZEN_ATTRIBUTION);
+  });
+
+  it('sends the same upstream request, since the summary still needs every sample', async () => {
+    const { full, lean } = await runBoth();
+    expect(await otdRequests(lean.http)).toEqual(await otdRequests(full.http));
+  });
+
+  it('validates against the output schema', async () => {
+    const { result } = await runRoute(VALUES, { include_samples: false });
+    expect(getProfileTool.output.safeParse(structured(result)).success).toBe(true);
+  });
+
+  it('prints the summary without the table, saying the rows were omitted', async () => {
+    const { full, lean } = await runBoth();
+    const text = contentText(lean.result);
+    expect(text).not.toContain('| # | Dist (m) |');
+    expect(text.split('\n').filter((line) => /^\| \d+ /.test(line))).toHaveLength(0);
+    expect(text).toContain('Per-sample rows omitted (include_samples: false).');
+    const summaryOf = (body: string) => body.slice(0, body.indexOf('\n\n| # |'));
+    expect(text).toContain(summaryOf(contentText(full.result)));
+    const { notice, attribution } = structured(lean.result);
+    expect(text).toContain(`> ${notice}`);
+    expect(text).toContain(`**Sources:** ${attribution}`);
   });
 });
 
@@ -860,6 +922,17 @@ describe('format()', () => {
     const output = sampleOutput();
     const text = textOf(output);
     for (const leaf of leafStrings(output)) expect(text).toContain(leaf);
+  });
+
+  it('prints every output value of a result without samples, counting them from the coverage fields', () => {
+    const { samples: _samples, ...lean } = sampleOutput();
+    const output = getProfileTool.output.parse(lean);
+    const text = textOf(output);
+    for (const leaf of leafStrings(output)) expect(text).toContain(leaf);
+    expect(text).toContain('**Sampling:** 4 samples, 55.6 m apart, over 2 route vertices');
+    expect(text).toContain('**Coverage:** 3 of 4 samples with data (1 missing)');
+    expect(text).not.toContain('| # |');
+    expect(text.endsWith('Per-sample rows omitted (include_samples: false).')).toBe(true);
   });
 
   it('renders no data, varies, and the em dash placeholders in the table', () => {

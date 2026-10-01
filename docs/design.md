@@ -7,7 +7,7 @@
 | Name | Description | Key Inputs | Annotations |
 |:-----|:------------|:-----------|:------------|
 | `elevation_get_points` | Look up ground elevation at 1–100 coordinates, in meters and feet, with the dataset and resolution behind every point. | `points`, `source` | `readOnlyHint: true`, `openWorldHint: true` |
-| `elevation_get_profile` | Resample a route at evenly spaced points and summarize it: distance, ascent, descent, min/max elevation, steepest grades, plus the per-sample profile. | `path`, `samples`, `source` | `readOnlyHint: true`, `openWorldHint: true` |
+| `elevation_get_profile` | Resample a route at evenly spaced points and summarize it: distance, ascent, descent, min/max elevation, steepest grades, plus the per-sample profile unless `include_samples` is false. | `path`, `samples`, `include_samples`, `source` | `readOnlyHint: true`, `openWorldHint: true` |
 | `elevation_get_grid` | Sample a regular node grid over a bounding box; report the highest and lowest sampled points, mean, and relief. | `south`, `west`, `north`, `east`, `rows`, `cols`, `source` | `readOnlyHint: true`, `openWorldHint: true` |
 | `elevation_check_line_of_sight` | Decide whether terrain blocks the sightline between an observer and a target, with earth curvature and refraction; report the minimum clearance and the limiting terrain point. | `observer`, `target`, `observer_height_m`, `target_height_m`, `earth_model`, `samples`, `source` | `readOnlyHint: true`, `openWorldHint: true` |
 
@@ -89,7 +89,7 @@ These schemas live once in `src/mcp-server/tools/shared/inputs.ts` and are reuse
 - `.describe('Elevation source: auto (default) uses USGS 3DEP where it has data and Open Topo Data (SRTM, with Mapzen terrain tiles where SRTM has no data) for the rest; usgs_3dep uses 3DEP only; opentopodata uses Open Topo Data only. Case is ignored and spaces or hyphens read as underscores, so USGS-3DEP and open topo data are accepted; 3dep, usgs, and epqs are also aliases for usgs_3dep.')`
 - `z.preprocess(normalizeSource, z.enum(['auto','usgs_3dep','opentopodata']).default('auto'))`. `normalizeSource` maps `''` to `undefined` (so the default applies), then trims, lowercases, and replaces `-` and spaces with `_`, then applies the alias table `3dep → usgs_3dep`, `usgs → usgs_3dep`, `epqs → usgs_3dep`, `open_topo_data → opentopodata`. Each alias names exactly one source (Design Decisions §30).
 
-**Optional numeric and enum inputs** (`samples`, `rows`, `cols`, heights, `earth_model`) use the `blankAsUnset` wrapper (`z.preprocess(v => v === '' ? undefined : v, schema)`) so a form client's blank reaches the default. No optional field carries `.min(1)` to catch a blank.
+**Optional numeric, boolean, and enum inputs** (`samples`, `include_samples`, `rows`, `cols`, heights, `earth_model`) use the `blankAsUnset` wrapper (`z.preprocess(v => v === '' ? undefined : v, schema)`) so a form client's blank reaches the default. No optional field carries `.min(1)` to catch a blank.
 
 **Bounded arrays** (`points`, `path`) use `boundedArray(item, min, max)` = `z.preprocess((v, ctx) => { if (Array.isArray(v) && v.length > max) ctx.addIssue({ code: 'too_big', origin: 'array', maximum: max, inclusive: true }); return v; }, z.array(item).min(min).max(max))`. An oversized list fails with its one `too_big` issue and no element issues, never one issue per bad field of a 10,000-item paste: an issue raised in the preprocess step stops the pipe before the array parses any element. Zod's own `.max()` check runs only after every element has been parsed, and slicing to `max + 1` first still left about 200 issues for a 10,000-point invalid paste. The inner `.max(max)` never fires but stays, so `tools/list` still advertises `items`, `minItems`, and `maxItems`. `points` first wraps a bare point object into a one-element array.
 
@@ -171,19 +171,20 @@ No caller-input reasons: input shape is enforced by the schema, and a miss is a 
 
 ### `elevation_get_profile`
 
-**Description:** "Sample terrain elevation at evenly spaced points along a route (a polyline of 2–1,000 vertices) and summarize it. Returns total distance, cumulative ascent and descent, start, end, minimum, and maximum elevation, and the steepest climb and descent grades, plus the per-sample profile with each sample's dataset. Ascent and descent are summed between samples, so they depend on the sample spacing reported in the result: denser sampling captures more small climbs, down to the source's resolution. Over open water, Mapzen samples are sea-floor depths. Each USGS 3DEP sample is a separate upstream request, so up to 250 samples take roughly 10–30 seconds."
+**Description:** "Sample terrain elevation at evenly spaced points along a route (a polyline of 2–1,000 vertices) and summarize it. Returns total distance, cumulative ascent and descent, start, end, minimum, and maximum elevation, and the steepest climb and descent grades, plus the per-sample profile with each sample's dataset unless include_samples is false. Ascent and descent are summed between samples, so they depend on the sample spacing reported in the result: denser sampling captures more small climbs, down to the source's resolution. Over open water, Mapzen samples are sea-floor depths. Each USGS 3DEP sample is a separate upstream request, so up to 250 samples take roughly 10–30 seconds."
 
 | Param | Type | Maps to | Notes |
 |:------|:-----|:--------|:------|
 | `path` | `boundedArray(PointSchema, 2, 1000)` | geometry | `.describe('Route vertices in travel order, 2–1,000 {lat, lon} objects in decimal degrees (WGS84). Consecutive duplicate vertices are ignored.')` |
-| `samples` | `blankAsUnset(z.number().int().min(2).max(250).default(100))` | sample count | `.describe('Number of evenly spaced samples along the route, endpoints included (2–250, default 100). More samples catch more relief and take longer; spacing finer than the source resolution adds no detail.')` |
+| `samples` | `blankAsUnset(z.number().int().min(2).max(250).default(100))` | sample count | `.describe('Number of evenly spaced samples along the route, endpoints included (2–250, default 100). More samples catch more relief and take longer; spacing finer than the source resolution adds no detail. For a large count where only the summary matters, set include_samples to false.')` |
+| `include_samples` | `blankAsUnset(z.boolean().default(true))` | output shape | `.describe('Return the per-sample profile (default true). false omits samples and the sample table; the summary, spacing, coverage counts, datasets, notices, and attribution are unchanged, still computed from every sample.')`. Changes only what is returned: every sample is still requested and fed to the summary and notices (Design Decisions §36). |
 | `source` | `SourceSchema` | routing | |
 
 **Output:**
 
 | Field | Type | Notes |
 |:------|:-----|:------|
-| `samples[]` | array, length = `samples` | In route order. |
+| `samples[]` | array, length = `samples`, optional | In route order. Absent when `include_samples` is false. |
 | `samples[].distance_m` | number | Cumulative distance along the route from the first vertex. |
 | `samples[].lat`, `samples[].lon` | number | Sample location. |
 | `samples[].elevation_m` | number, optional | Absent when no dataset had data. |
@@ -205,7 +206,7 @@ No caller-input reasons: input shape is enforced by the schema, and a miss is a 
 | `resolution_m_range` | `{ min_m: number, max_m: number }`, optional | Over samples that report a resolution; absent when none does (all Mapzen). |
 | `source_mode` | enum | Applied `source`. |
 
-`format()`: a summary block (distance in km and m, ascent and descent in m and ft, range, net change, grades with their distances, highest and lowest points, interval, data coverage, datasets), then a table `| # | Dist (m) | Lat, Lon | Elev (m) | Grade (%) | Dataset | Res (m) |` with every sample. The table prints `distance_m` exactly as `structuredContent` carries it, so the two surfaces agree value for value.
+`format()`: a summary block (distance in km and m, ascent and descent in m and ft, range, net change, grades with their distances, highest and lowest points, interval, data coverage, datasets), then a table `| # | Dist (m) | Lat, Lon | Elev (m) | Grade (%) | Dataset | Res (m) |` with every sample. The table prints `distance_m` exactly as `structuredContent` carries it, so the two surfaces agree value for value. The sample count in the Sampling and Coverage lines is `samples_with_data + missing_samples`, so it holds without `samples[]`; when `samples[]` is absent the table is replaced by the line `Per-sample rows omitted (include_samples: false).`
 
 **Notice fragments:**
 
@@ -564,6 +565,8 @@ A typical cross-tool chain: resolve a trailhead and a summit to coordinates (any
 33. **Profile start, end, and net change are required output fields.** A profile with no sample with data fails with `no_coverage`, so every successful result has a first and last sample with data. Optional fields would advertise an absence that cannot occur.
 34. **Geometry reports degenerate inputs as values, not throws.** `resamplePath` returns `kind: 'degenerate'` and `lineOfSight` returns `kind: 'endpoint_no_data'`; each tool maps that to its own declared reason with `ctx.fail`, so `data.reason` and the tool-specific recovery reach the wire, and the geometry stays a pure function that tests can call directly.
 35. **The extreme grades carry their own distances** (`max_grade_distance_m`, `min_grade_distance_m`), taken from the sample index `profileStats` chose. Locating them by matching the rounded `grade_pct` against the samples labels the first match, which is the wrong sample when two grades round alike and the steeper one comes second.
+36. **`include_samples` (default `true`) trims the profile's output, never its sampling.** At the 250-sample cap the per-sample rows are most of a profile response (about 52 KB, counting `samples[]` and the text table), while the summary they feed is a small fraction of it. Lowering `samples` shrinks the payload only by coarsening ascent and descent, which the summary exists to avoid. The default stays `true` so existing callers keep their output and so `elevation_check_line_of_sight`'s pointer to `elevation_get_profile` "to see the terrain between the points" still gets the rows. The summary, counts, and notices are computed from every sample either way, so the two results differ only by `samples[]` and the table.
+37. **Line-of-sight output objects state their shared facts once.** `observer`/`target` share one schema, as do `limiting_point`/`first_obstruction`. Their per-field describes are short labels, since units are in the field names. The facts the fields share (coordinate units, the sea-surface rule, the sightline and clearance formulas, Mapzen's missing resolution) are written once in the describe at the first use site, and `target` and `first_obstruction` point to their twin. Repeating those facts on every field of every use cost about 860 B of the tool's `tools/list` entry.
 
 ## Known Limitations
 

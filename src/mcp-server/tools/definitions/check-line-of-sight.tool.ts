@@ -39,61 +39,31 @@ function normalizeEarthModel(value: unknown): unknown {
   return typeof value === 'string' ? value.trim().toLowerCase() : value;
 }
 
-const EndpointSchema = z
-  .object({
-    lat: z.number().describe('Latitude, decimal degrees.'),
-    lon: z.number().describe('Longitude, decimal degrees.'),
-    ground_elevation_m: z
-      .number()
-      .describe('Terrain elevation at the endpoint as the dataset reports it, meters.'),
-    surface_elevation_m: z
-      .number()
-      .describe(
-        'Surface the height is measured from, meters: the ground, or 0 where a Mapzen value below 0 marks open water.',
-      ),
-    height_above_ground_m: z.number().describe('Height above the surface, meters, as requested.'),
-    sightline_elevation_m: z
-      .number()
-      .describe('Sightline elevation at the endpoint (surface plus height), meters.'),
-    dataset: z.enum(DATASETS).describe('Dataset that answered the endpoint.'),
-    resolution_m: z
-      .number()
-      .optional()
-      .describe('Approximate ground spacing of the answering raster, meters. Absent for mapzen.'),
-  })
-  .describe('One end of the sightline.');
+/** Field labels only; the facts they share are stated once on `observer` at its use site. */
+const EndpointSchema = z.object({
+  lat: z.number().describe('Latitude.'),
+  lon: z.number().describe('Longitude.'),
+  ground_elevation_m: z.number().describe('Ground elevation.'),
+  surface_elevation_m: z.number().describe('Surface elevation.'),
+  height_above_ground_m: z.number().describe('Requested height above the surface.'),
+  sightline_elevation_m: z.number().describe('Sightline elevation.'),
+  dataset: z.enum(DATASETS).describe('Answering dataset.'),
+  resolution_m: z.number().optional().describe('Raster resolution.'),
+});
 
-const TerrainPointSchema = z
-  .object({
-    lat: z.number().describe('Latitude, decimal degrees.'),
-    lon: z.number().describe('Longitude, decimal degrees.'),
-    distance_from_observer_m: z.number().describe('Distance from the observer, meters.'),
-    terrain_elevation_m: z
-      .number()
-      .describe('Terrain elevation as the dataset reports it, meters.'),
-    surface_elevation_m: z
-      .number()
-      .describe(
-        'Surface the sightline must clear, meters: the terrain, or 0 where a Mapzen value below 0 marks open water.',
-      ),
-    curvature_bulge_m: z
-      .number()
-      .describe(
-        'Rise of the curved surface above the straight observer-target chord at this point, meters (0 for flat).',
-      ),
-    sightline_elevation_m: z.number().describe('Sightline elevation at this point, meters.'),
-    clearance_m: z
-      .number()
-      .describe(
-        'Sightline minus (surface + curvature bulge), meters; 0 or negative means the terrain blocks the line.',
-      ),
-    dataset: z.enum(DATASETS).describe('Dataset that answered this sample.'),
-    resolution_m: z
-      .number()
-      .optional()
-      .describe('Approximate ground spacing of the answering raster, meters. Absent for mapzen.'),
-  })
-  .describe('A terrain sample between the endpoints, measured against the sightline.');
+/** Field labels only; the facts they share are stated once on `limiting_point` at its use site. */
+const TerrainPointSchema = z.object({
+  lat: z.number().describe('Latitude.'),
+  lon: z.number().describe('Longitude.'),
+  distance_from_observer_m: z.number().describe('Distance from the observer.'),
+  terrain_elevation_m: z.number().describe('Terrain elevation.'),
+  surface_elevation_m: z.number().describe('Surface elevation.'),
+  curvature_bulge_m: z.number().describe('Curvature bulge.'),
+  sightline_elevation_m: z.number().describe('Sightline elevation.'),
+  clearance_m: z.number().describe('Clearance.'),
+  dataset: z.enum(DATASETS).describe('Answering dataset.'),
+  resolution_m: z.number().optional().describe('Raster resolution.'),
+});
 
 type TerrainPoint = z.infer<typeof TerrainPointSchema>;
 
@@ -129,8 +99,10 @@ export const checkLineOfSightTool = tool('elevation_check_line_of_sight', {
         'blocked when terrain reaches the sightline at any sample; clear when every sample between the endpoints has data and lies below it; indeterminate when samples without data leave the line unconfirmed.',
       ),
     distance_m: z.number().describe('Great-circle distance from observer to target, meters.'),
-    observer: EndpointSchema,
-    target: EndpointSchema,
+    observer: EndpointSchema.describe(
+      "The observer's end of the sightline, in decimal degrees and meters. Ground elevation is as the dataset reports it; surface is the ground, or 0 where a Mapzen value below 0 marks open water; sightline = surface + height. resolution_m is absent for mapzen.",
+    ),
+    target: EndpointSchema.describe("The target's end of the sightline; fields as on observer."),
     min_clearance_m: z
       .number()
       .optional()
@@ -142,10 +114,10 @@ export const checkLineOfSightTool = tool('elevation_check_line_of_sight', {
       .optional()
       .describe('Smallest clearance in international feet. Absent with min_clearance_m.'),
     limiting_point: TerrainPointSchema.optional().describe(
-      'The sample with the smallest clearance (first on ties). Absent when no sample between the endpoints has data.',
+      'The sample between the endpoints with the smallest clearance (first on ties); absent when none of them has data. In decimal degrees and meters. Terrain is as the dataset reports it; surface is the terrain, or 0 where a Mapzen value below 0 marks open water; bulge is the rise of the curved surface above the straight observer-target chord (0 for flat); clearance = sightline − (surface + bulge), and 0 or below means blocked. resolution_m is absent for mapzen.',
     ),
     first_obstruction: TerrainPointSchema.optional().describe(
-      'The obstructing sample nearest the observer. Present only when the verdict is blocked.',
+      'The obstructing sample nearest the observer; present only when the verdict is blocked. Fields as on limiting_point.',
     ),
     obstructed_samples: z
       .number()
