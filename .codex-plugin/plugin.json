@@ -1,6 +1,6 @@
 {
   "name": "elevation-mcp-server",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Look up elevation worldwide, profile route ascent/descent, grid areas, check terrain line of sight.",
   "author": {
     "name": "cyanheads",
