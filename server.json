@@ -1,7 +1,7 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.cyanheads/elevation-mcp-server",
-  "description": "Terrain analysis: route ascent/descent profiles, elevation grids, line-of-sight, US 3DEP elevation.",
+  "description": "Look up elevation worldwide, profile route ascent/descent, grid areas, check terrain line of sight.",
   "repository": {
     "url": "https://github.com/cyanheads/elevation-mcp-server",
     "source": "github"
@@ -34,7 +34,7 @@
         },
         {
           "name": "OPENTOPODATA_BASE_URL",
-          "description": "Base URL of the Open Topo Data instance used outside USGS 3DEP coverage. Defaults to the public instance, paced to its published limits; any other URL is treated as a self-hosted instance, which must serve the srtm30m and mapzen datasets and accept 100 locations per request.",
+          "description": "Base URL of the Open Topo Data instance used outside USGS 3DEP coverage. Defaults to the public instance, paced to its published limits; any other URL is treated as a self-hosted instance, which must serve the srtm30m and mapzen datasets and accept at least 100 locations per request.",
           "format": "string",
           "isRequired": false,
           "default": "https://api.opentopodata.org"
@@ -98,7 +98,7 @@
         },
         {
           "name": "OPENTOPODATA_BASE_URL",
-          "description": "Base URL of the Open Topo Data instance used outside USGS 3DEP coverage. Defaults to the public instance, paced to its published limits; any other URL is treated as a self-hosted instance, which must serve the srtm30m and mapzen datasets and accept 100 locations per request.",
+          "description": "Base URL of the Open Topo Data instance used outside USGS 3DEP coverage. Defaults to the public instance, paced to its published limits; any other URL is treated as a self-hosted instance, which must serve the srtm30m and mapzen datasets and accept at least 100 locations per request.",
           "format": "string",
           "isRequired": false,
           "default": "https://api.opentopodata.org"

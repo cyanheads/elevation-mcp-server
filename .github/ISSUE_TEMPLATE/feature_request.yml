@@ -1,7 +1,7 @@
 name: Feature Request
 description: Suggest a new feature or improvement for elevation-mcp-server
 labels: ["enhancement"]
-# assignees: ["your-github-username"]  # uncomment to auto-assign new issues
+assignees: ["cyanheads"]
 # The secondary labels listed below must exist in the repo — create each once: gh label create <name>
 body:
   - type: markdown

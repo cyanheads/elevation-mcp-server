@@ -1,7 +1,7 @@
 {
   "name": "elevation-mcp-server",
   "version": "0.1.0",
-  "description": "Terrain analysis over elevation data: route ascent/descent profiles, bounding-box elevation grids, line-of-sight clearance, and US 3DEP point elevation.",
+  "description": "Look up elevation worldwide, profile route ascent/descent, grid areas, check terrain line of sight.",
   "author": {
     "name": "cyanheads",
     "email": "casey@caseyjhand.com",
@@ -10,14 +10,29 @@
   "homepage": "https://github.com/cyanheads/elevation-mcp-server#readme",
   "repository": "https://github.com/cyanheads/elevation-mcp-server",
   "license": "Apache-2.0",
-  "keywords": ["mcp", "mcp-server", "model-context-protocol", "elevation", "terrain", "geospatial", "usgs-3dep"],
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "typescript",
+    "elevation",
+    "terrain",
+    "topography",
+    "dem",
+    "geospatial",
+    "usgs-3dep",
+    "srtm",
+    "opentopodata",
+    "elevation-profile",
+    "line-of-sight"
+  ],
   "mcpServers": "./.codex-plugin/mcp.json",
   "interface": {
     "displayName": "elevation-mcp-server",
-    "shortDescription": "Route ascent/descent profiles, elevation grids, and line-of-sight clearance.",
-    "longDescription": "Computes over terrain rather than just looking up height. Sample a route for total ascent, descent, and steepest grade, pull a bounding-box elevation grid with its highest and lowest cells, or check whether terrain blocks the line of sight between two points. Point elevation uses USGS 3DEP LiDAR-derived data where the US is covered and falls back to global SRTM data elsewhere, and every sample reports which dataset answered.",
+    "shortDescription": "Look up elevation worldwide, profile route ascent/descent, grid areas, check terrain line of sight.",
+    "longDescription": "Ground elevation and terrain analysis anywhere on Earth, with no API key. Look up as many as 100 points per call, sample a route for its distance, ascent, descent, and steepest grades, grid a bounding box for its highest and lowest points and relief, or check whether terrain blocks the sightline between two points, accounting for earth curvature and refraction. USGS 3DEP answers across the US and its territories, plus much of Canada and Mexico, at 1–30 m; everywhere else Open Topo Data answers from SRTM at about 30 m, with Mapzen terrain tiles where SRTM has no tile, including the sea floor. Every value names the dataset that answered, and every result lists the sources to credit.",
     "developerName": "cyanheads",
-    "category": "Research",
+    "category": "data",
     "capabilities": ["Read"],
     "websiteURL": "https://github.com/cyanheads/elevation-mcp-server",
     "defaultPrompt": []

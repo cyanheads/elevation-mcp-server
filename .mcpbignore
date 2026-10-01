@@ -5,6 +5,9 @@
 /framework-skills/
 /docs/idea.md
 /logs/
+/coverage/
+/tests/
+/scripts/
 /Dockerfile
 /bun.lock
 /bunfig.toml

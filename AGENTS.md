@@ -11,19 +11,6 @@
 
 ---
 
-## First Session
-
-This project was just scaffolded with `bunx @cyanheads/mcp-ts-core init`. You're holding a production-grade MCP framework with the hard parts already solved — error handling, telemetry, auth, transport, validation, lifecycle. What's missing is the **domain**. Your job: design the tool, resource, and service surface with the user, then implement it as small pure handlers that throw — the framework catches, classifies, and instruments the rest. Design before code; the user's first messages set direction, so wait for them before scaffolding definitions.
-
-> **Remove this section** from CLAUDE.md / AGENTS.md after completing these steps. The skills and conventions below remain — this block is one-time onboarding only.
-
-1. **Get your bearings.** Take stock of the project tree, the skills in `framework-skills/`, and the tools/MCP servers available. Light tool use is fine for context-building — you're mapping the territory, not committing yet.
-2. **Read the framework docs** — `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` (builders, Context, errors, exports, conventions)
-3. **Run the `setup` skill** — read `framework-skills/setup/SKILL.md` and follow its checklist (project orientation, agent protocol file selection, echo definition cleanup, skill sync)
-4. **Design the server** — read `framework-skills/design-mcp-server/SKILL.md` and work through it with the user to map the domain into tools, resources, and services before scaffolding
-
----
-
 ## What's Next?
 
 When the user asks what's next or needs direction, suggest options based on the current project state. Common next steps:
@@ -59,75 +46,90 @@ Tailor suggestions to what's actually missing or stale — don't recite the full
 
 ### Tool
 
+Trimmed from `src/mcp-server/tools/definitions/get-points.tool.ts`; the file is the source of truth. The output item schema, five of the six error entries, the notice builder, and `format()` are condensed here. The other three tools follow the same shape and add pure geometry before and after the sampler call.
+
 ```ts
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { boundedArray, PointSchema, SourceSchema } from '@/mcp-server/tools/shared/inputs.js';
+import { attributionFor } from '@/services/elevation/attribution.js';
+import { getElevationSampler } from '@/services/elevation/elevation-sampler.js';
+import { SOURCE_MODES } from '@/services/elevation/types.js';
 
-export const searchItems = tool('search_items', {
-  description: 'Search inventory items by query.',
-  annotations: { readOnlyHint: true },
+export const getPointsTool = tool('elevation_get_points', {
+  title: 'Get Point Elevations',
+  description: 'Look up ground elevation at up to 100 coordinates in one call, …',
+  annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
+  auth: ['tool:elevation_get_points:read'],
   input: z.object({
-    query: z.string().describe('Search terms'),
-    limit: z.number().int().min(1).max(100).default(10).describe('Max results (1–100)'),
+    points: z
+      .preprocess(
+        (value) =>
+          value !== null && typeof value === 'object' && !Array.isArray(value) ? [value] : value,
+        boundedArray(PointSchema, 1, MAX_POINTS),
+      )
+      .describe('1–100 points as {lat, lon} objects in decimal degrees (WGS84). …'),
+    source: SourceSchema,
   }),
   output: z.object({
-    items: z.array(z.object({
-      id: z.string().describe('Item ID'),
-      name: z.string().describe('Item name'),
-    })).describe('Matching items'),
+    points: z.array(PointResultSchema).describe('One entry per input point, in input order.'),
+    points_with_data: z.number().int().describe('Number of points with status ok.'),
+    source_mode: z.enum(SOURCE_MODES).describe('The source the call used (auto unless the caller chose one).'),
   }),
-  auth: ['inventory:read'],
+  enrichment: {
+    notice: z.string().optional().describe('Guidance on points without data, …'),
+    attribution: z
+      .string()
+      .describe('Sources to credit for the returned values, one line per dataset that answered.'),
+  },
+  enrichmentTrailer: { attribution: { label: 'Sources' } },
+  errors: [
+    {
+      reason: 'usgs_unavailable',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'USGS 3DEP failed: …',
+      recovery: 'USGS 3DEP did not answer or rejected the request. … re-call it with source opentopodata …',
+      thrownBy: 'service',
+    },
+    // opentopodata_unavailable, opentopodata_rate_limited, opentopodata_daily_limit,
+    // opentopodata_config_rejected, sampling_deadline_exceeded: same shape, thrownBy 'service'
+  ],
 
   async handler(input, ctx) {
-    const items = await findItems(input.query, input.limit);
-    ctx.log.info('Search completed', { query: input.query, count: items.length });
-    return { items };
+    const samples = await getElevationSampler().sample(input.points, input.source, ctx);
+    ctx.enrich({ attribution: attributionFor(samples) }); // before any ctx.fail or notice branch
+
+    const points = samples.map(toPointResult);
+    const notice = buildNotice(points, input.source);
+    if (notice) ctx.enrich.notice(notice);
+
+    return {
+      points,
+      points_with_data: points.filter((point) => point.status === 'ok').length,
+      source_mode: input.source,
+    };
   },
 
-  // format() populates content[] — the markdown twin of structuredContent.
-  // Different clients read different surfaces (Claude Code → structuredContent,
-  // Claude Desktop → content[]); both must carry the same data.
-  // Enforced at lint time: every field in `output` must appear in the rendered text.
-  format: (result) => [{
-    type: 'text',
-    text: result.items.map(i => `**${i.id}**: ${i.name}`).join('\n'),
-  }],
+  // format() populates content[], the markdown twin of structuredContent. Different
+  // clients read different surfaces (Claude Code → structuredContent, Claude Desktop →
+  // content[]); `format-parity` requires every output field in the rendered text.
+  format: (result) => [{ type: 'text', text: '…' }], // heading line + one table row per point
 });
 ```
 
-### Resource
+Conventions this surface holds to, and that a new tool inherits:
 
-```ts
-import { resource, z } from '@cyanheads/mcp-ts-core';
-import { notFound } from '@cyanheads/mcp-ts-core/errors';
+- **Every elevation comes from `ElevationSampler`.** Tools never call a provider client. `getElevationSampler().sample(points, source, ctx)` owns routing, the 3DEP coverage envelope, dedupe, chunking at 100, the 45 s budget, and error normalization. A coverage miss comes back as a sample without data; a provider failure rejects with one of the six service reasons.
+- **Shared inputs live in `tools/shared/inputs.ts`.** `PointSchema` for every coordinate, `SourceSchema` on every tool, `blankAsUnset` around every optional numeric, boolean, and enum input so a form client's blank reaches the default, and `boundedArray` for point lists so an oversized paste fails with one `too_big` issue.
+- **Attribution is required enrichment.** Each tool declares `notice` (optional) then `attribution` (required, rendered as the `Sources:` trailer), and writes `attribution` immediately after the sampler resolves, before any `ctx.fail` or notice branch, so every success path carries it. Notice fragments are joined, in the order `docs/design.md` lists them, into one `ctx.enrich.notice()` call.
+- **Error contracts are inline per tool.** The six service reasons carry `thrownBy: 'service'` and a recovery naming the tool itself; handler reasons (`degenerate_path`, `no_coverage`, `invalid_bbox`, `too_many_cells`, `same_endpoints`, `endpoint_no_data`) go through `ctx.fail`.
+- **Absent stays absent.** A point or sample without data omits `elevation_m`, `dataset`, and `resolution_m`; grid cells use `null` to keep matrix positions. Nothing is coerced to 0. Upstream-authored text reaches output in one field, `acquisition_date`, and `format()` renders it only through `inlineText()`.
+- **Geometry is pure.** `src/services/elevation/geometry.ts` does no I/O and reports degenerate inputs as values (`kind: 'degenerate'`, `kind: 'endpoint_no_data'`) that each tool maps to its own reason.
+- **`docs/design.md` is the spec.** Tool contracts, notice fragments, recovery strings, and the design decisions behind them live there; keep it in step when a contract changes.
 
-export const itemData = resource('inventory://{itemId}', {
-  description: 'Fetch an inventory item by ID.',
-  params: z.object({ itemId: z.string().describe('Item identifier') }),
-  auth: ['inventory:read'],
-  async handler(params, ctx) {
-    const item = await ctx.state.get(`item/${params.itemId}`);
-    if (!item) throw notFound(`Item ${params.itemId} not found`, { itemId: params.itemId });
-    return item;
-  },
-});
-```
+### Resource / Prompt
 
-### Prompt
-
-```ts
-import { prompt, z } from '@cyanheads/mcp-ts-core';
-
-export const reviewCode = prompt('review_code', {
-  description: 'Review code for issues and best practices.',
-  args: z.object({
-    code: z.string().describe('Code to review'),
-    language: z.string().optional().describe('Programming language'),
-  }),
-  generate: (args) => [
-    { role: 'user', content: { type: 'text', text: `Review this ${args.language ?? ''} code:\n${args.code}` } },
-  ],
-});
-```
+This server ships neither: nothing it serves is a stable, addressable record, and every workflow is a single tool call (`docs/design.md` § Design Decisions). If that changes, the `add-resource` and `add-prompt` skills carry the current patterns.
 
 ### Server config
 
@@ -136,47 +138,68 @@ export const reviewCode = prompt('review_code', {
 import { z } from '@cyanheads/mcp-ts-core';
 import { parseEnvConfig } from '@cyanheads/mcp-ts-core/config';
 
+/** The public Open Topo Data instance, used when `OPENTOPODATA_BASE_URL` is unset. */
+export const PUBLIC_OPENTOPODATA_BASE_URL = 'https://api.opentopodata.org';
+
 const ServerConfigSchema = z.object({
-  apiKey: z.string().describe('External API key'),
-  maxResults: z.coerce.number().default(100),
-  verboseLogging: z.stringbool().default(false).describe('Enable verbose logging'),
+  openTopoDataBaseUrl: z
+    .preprocess(
+      (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),
+      z.url({ protocol: /^https?$/ }).default(PUBLIC_OPENTOPODATA_BASE_URL),
+    )
+    .describe(
+      'Base URL of the Open Topo Data instance. Any URL other than the public instance is treated as a self-hosted instance.',
+    ),
 });
 
-let _config: z.infer<typeof ServerConfigSchema> | undefined;
-export function getServerConfig() {
+export type ServerConfig = z.infer<typeof ServerConfigSchema>;
+
+let _config: ServerConfig | undefined;
+
+/** Parses the server's env vars once, on first use. */
+export function getServerConfig(): ServerConfig {
   _config ??= parseEnvConfig(ServerConfigSchema, {
-    apiKey: 'MY_API_KEY',
-    maxResults: 'MY_MAX_RESULTS',
-    verboseLogging: 'MY_VERBOSE_LOGGING',
+    openTopoDataBaseUrl: 'OPENTOPODATA_BASE_URL',
   });
   return _config;
 }
 ```
 
-`parseEnvConfig` maps Zod schema paths → env var names so errors name the variable (`MY_API_KEY`) not the path (`apiKey`). Throws `ConfigurationError`, which the framework prints as a clean startup banner.
+`parseEnvConfig` maps Zod schema paths → env var names so errors name the variable (`OPENTOPODATA_BASE_URL`) not the path (`openTopoDataBaseUrl`). Throws `ConfigurationError`, which the framework prints as a clean startup banner. The public instance gets the pacers sized to its published limits (one request in flight, starts 1.1 s apart, 1,000 per trailing 24 hours); any other host is the operator's instance and gets 4 concurrent requests with no rate windows. Pacing, caps, and the budget are constants, not configuration.
+
+Adding a variable means updating the schema above, `.env.example`, `server.json` (`environmentVariables[]` in both package entries), `manifest.json` (`user_config` + `mcp_config.env`), `.claude-plugin/plugin.json` (`userConfig` + `env`), `.codex-plugin/mcp.json` (`env_vars`), and the README configuration table. `lint:packaging` fails on a manifest mismatch.
 
 For env booleans use `z.stringbool()`, never `z.coerce.boolean()` — `Boolean("false")` is `true`, so a coerced flag can't be disabled through the environment. `z.stringbool()` parses `true/false/1/0/yes/no/on/off` and rejects anything else, so `=false` actually disables.
 
 ### Server identity and instructions
 
-`createApp()` accepts optional identity fields forwarded to the SDK's `initialize` response and the server manifest (`/.well-known/mcp.json`):
-
 ```ts
+// src/index.ts — `name` and `title` are both the bare repo name, never Title Case and
+// never the npm scope; `lint:packaging` enforces the pair. `description` derives from
+// package.json, the canonical source, so it is not repeated here.
+const config = getServerConfig();
+
 await createApp({
-  name: 'my-mcp-server',
-  title: 'My Server',                         // human-readable display name
-  websiteUrl: 'https://github.com/owner/repo', // canonical homepage URL
-  description: 'One-line description.',        // wins over MCP_SERVER_DESCRIPTION
-  icons: [{ src: 'https://example.com/icon.png', sizes: ['48x48'], mimeType: 'image/png' }],
-  instructions: 'Use shortcut alpha for the most common case.', // session-level context
+  name: 'elevation-mcp-server',
+  title: 'elevation-mcp-server',
+  tools: allToolDefinitions,
+  instructions: buildServerInstructions(config),
+  setup() {
+    initElevationServices(config);
+  },
+  teardown() {
+    disposeElevationServices();
+  },
 });
 ```
+
+The instructions are built from config before `createApp()` loads `.env`, so `src/index.ts` calls `process.loadEnvFile()` first (variables already set win; a missing file is the normal case). `buildServerInstructions()` (`src/mcp-server/server-instructions.ts`) appends the public Open Topo Data limits sentence only when `OPENTOPODATA_BASE_URL` points at the public instance, since it would misstate a deployment pointed at its own.
 
 `instructions` is optional server-level orientation, sent on every `initialize` as session-level context. Use it for deployment guidance (connection aliases, regional notes, scope hints) instead of repeating the same context across tool descriptions. Client adoption is uneven, but there's no downside when set.
 
 ### Session posture and shutdown
 
-Two more `createApp()` options shape how the server runs rather than how it presents itself:
+This server sets no `sessionMode`: no tool asks the caller for input mid-call, so every mode works, and `.env.example` and the Dockerfile set `MCP_SESSION_MODE=stateless`. `setup()` builds both provider clients, their pacers, and the sampler; `teardown()` disposes every pacer.
 
 ```ts
 await createApp({
@@ -198,16 +221,14 @@ Handlers receive a unified `ctx` object. Key properties:
 
 | Property | Description |
 |:---------|:------------|
-| `ctx.log` | Request-scoped logger — `.debug()`, `.info()`, `.notice()`, `.warning()`, `.error()`. Auto-correlates requestId, traceId, tenantId. Dual-sink: Pino **and** `notifications/message` to the client, so treat it as client-visible. |
-| `ctx.state` | Tenant-scoped KV — `.get(key)`, `.set(key, value, { ttl? })`, `.delete(key)`, `.getMany(keys)`, `.list(prefix, { cursor, limit })`. Accepts any JSON-serializable value; reads return its JSON form (a `Date` comes back as an ISO string). |
-| `ctx.requestInput` | Suspend and ask the caller for more input — `return ctx.requestInput({ inputRequests: { key: inputRequired.elicit({ message, requestedSchema }) } })`. Never returns; the handler is re-entered with the answers. Always present. |
-| `ctx.inputs` | The request's responses — `.accepted(key, schema)`, `.view(key)`, `.state()`, `.dropped` — limited to what the client declared (`elicitation` and its form/url modes, `sampling`, `roots`). Client-supplied: a consent gate trusts only a `ctx.state` record it stored when it asked, bound to the operation, caller, and target (see the `api-context` skill). |
-| `ctx.clientCapabilities` | What the client declared for this request, `undefined` when no view exists. Decides whether to ask for optional context (e.g. roots); never a reason to skip a consent prompt. |
-| `ctx.enrich` | Success-path agent context (empty-result notices, query echo, pagination totals) — `ctx.enrich(...)` or `.notice()` / `.total()` / `.echo()` / `.truncated()`. Reaches `structuredContent` and `content[]`; lands only when the definition declares an `enrichment` block (no-op otherwise). |
-| `ctx.content` | Non-text content blocks — `.image(data, mimeType)`, `.audio(data, mimeType)`, or `ctx.content(block)` for a raw block. Prepended to `content[]` after `format()`; never enters `structuredContent`. |
-| `ctx.signal` | `AbortSignal` for cancellation. |
+| `ctx.log` | Request-scoped logger — `.debug()`, `.info()`, `.notice()`, `.warning()`, `.error()`. Auto-correlates requestId, traceId, tenantId. Dual-sink: Pino **and** `notifications/message` to the client, so treat it as client-visible. The sampler logs one `info` record per call; provider clients log upstream miss and error bodies at `debug` (first 200 characters), never returning them. |
+| `ctx.enrich` | Success-path agent context — `ctx.enrich(...)` or `.notice()` / `.total()` / `.echo()` / `.truncated()`. Reaches `structuredContent` and `content[]`; lands only when the definition declares an `enrichment` block (no-op otherwise). Every tool here writes `attribution` and, when a condition applies, one joined `notice`. |
+| `ctx.fail` | Typed throw against the tool's own `errors[]` reason union. See Errors. |
+| `ctx.signal` | `AbortSignal` for cancellation. The sampler links it to its own `AbortController`, which also aborts outstanding upstream requests on the first fatal error. |
 | `ctx.requestId` | Request ID — the one every log record of the call carries and its error envelope returns as `data.requestId`. |
 | `ctx.tenantId` | Tenant ID from JWT; `'default'` for stdio or HTTP with auth off. |
+
+**Not used here.** `ctx.state`: nothing is stored, since the server is keyless and keeps no cross-call cache. `ctx.requestInput` / `ctx.inputs` / `ctx.clientCapabilities`: no tool asks the caller for input mid-call, which is why any session mode works. `ctx.content`: every response is text plus `structuredContent`. The framework CLAUDE.md carries the full signatures if a change needs one.
 
 ---
 
@@ -259,20 +280,32 @@ See framework CLAUDE.md and the `api-errors` skill for the full auto-classificat
 
 ```text
 src/
-  index.ts                              # createApp() entry point
+  index.ts                              # createApp() entry point — four tools, instructions, service lifecycle
   config/
-    server-config.ts                    # Server-specific env vars (Zod schema)
-  services/
-    [domain]/
-      [domain]-service.ts               # Domain service (init/accessor pattern)
-      types.ts                          # Domain types
+    server-config.ts                    # OPENTOPODATA_BASE_URL (Zod schema)
   mcp-server/
-    tools/definitions/
-      [tool-name].tool.ts               # Tool definitions
-    resources/definitions/
-      [resource-name].resource.ts       # Resource definitions
-    prompts/definitions/
-      [prompt-name].prompt.ts           # Prompt definitions
+    server-instructions.ts              # Server instructions, built from config
+    tools/
+      definitions/
+        index.ts                        # allToolDefinitions barrel
+        [tool-name].tool.ts             # One file per elevation_* tool
+      shared/
+        inputs.ts                       # PointSchema, SourceSchema, blankAsUnset, boundedArray
+        outputs.ts                      # DatasetsUsedSchema, ResolutionRangeSchema, provenance summaries
+        format.ts                       # inlineText() and count wording for format() and notices
+  services/
+    elevation/
+      elevation-sampler.ts              # ElevationSampler, coverage envelope, init/accessor/dispose lifecycle
+      geometry.ts                       # Pure math: distance, resampling, grid nodes, line of sight
+      attribution.ts                    # attributionFor() and the Mapzen attribution block
+      types.ts                          # Dataset, SourceMode, Sample, provider-call types
+      units.ts                          # Earth radius, plausibility floor, rounding, meters → feet
+    usgs-epqs/
+      usgs-epqs-client.ts               # USGS EPQS client and its pacer
+    opentopodata/
+      opentopodata-client.ts            # Open Topo Data client, request pacer, daily pacer
+    shared/
+      http-attempt.ts                   # Timed fetch attempt and bounded body read for both clients
 ```
 
 ---
@@ -281,10 +314,11 @@ src/
 
 | What | Convention | Example |
 |:-----|:-----------|:--------|
-| Files | kebab-case with suffix | `search-docs.tool.ts` |
-| Tool/resource/prompt names | snake_case | `search_docs` |
-| Directories | kebab-case | `src/services/doc-search/` |
-| Descriptions | Single string or template literal, no `+` concatenation | `'Search items by query and filter.'` |
+| Files | kebab-case with suffix | `get-points.tool.ts` |
+| Tool names | snake_case, `elevation_` prefix | `elevation_get_points` |
+| Directories | kebab-case | `src/services/usgs-epqs/` |
+| Input and output fields | snake_case, unit in the name for every numeric field | `elevation_m`, `sample_interval_m`, `grade_pct` |
+| Descriptions | Single string or template literal, no `+` concatenation | `'Sources to credit for the returned values, one line per dataset that answered.'` |
 
 ---
 
@@ -357,11 +391,15 @@ When you complete a skill's checklist, check the boxes and add a completion time
 | `bun run format` | Auto-fix formatting (safe fixes only) |
 | `bun run format:unsafe` | Also apply Biome's unsafe autofixes — review the diff; they can change behavior |
 | `bun run test` | Run tests (Vitest — use `bun run test`, not `bun test`) |
+| `bun run test:coverage` | Run tests with coverage |
+| `bun run start` | Run the built server with the configured transport |
 | `bun run start:stdio` | Production mode (stdio) |
 | `bun run start:http` | Production mode (HTTP) |
 | `bun run changelog:build` | Regenerate `CHANGELOG.md` from `changelog/*.md` |
 | `bun run changelog:check` | Verify `CHANGELOG.md` is in sync (used by devcheck) |
 | `bun run bundle` | Build, pack, and clean a `.mcpb` for one-click Claude Desktop install |
+| `bun run release:github` | Create the GitHub Release and attach the `.mcpb` (release step) |
+| `bun run publish-mcp` | Log in to and publish `server.json` to the MCP Registry (release step) |
 
 **CI is one file.** `.github/workflows/codeql.yml` (scaffolded) is the only GitHub Actions workflow: CodeQL is GitHub-owned end to end, and the file runs only while the repo's CodeQL *default setup* is turned off. Verification — `devcheck`, tests, the release gates — runs locally; don't add a workflow that re-runs it.
 
@@ -418,7 +456,7 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { McpError, JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 
 // Server's own code — via path alias
-import { getMyService } from '@/services/my-domain/my-service.js';
+import { getElevationSampler } from '@/services/elevation/elevation-sampler.js';
 ```
 
 ---
@@ -434,7 +472,11 @@ import { getMyService } from '@/services/my-domain/my-service.js';
 - [ ] If wrapping external API: raw/domain/output schemas reviewed against real upstream sparsity/nullability before finalizing required vs optional fields
 - [ ] If wrapping external API: normalization and `format()` preserve uncertainty; do not fabricate facts from missing upstream data
 - [ ] If wrapping external API: tests include at least one sparse payload case with omitted upstream fields
-- [ ] Registered in `createApp()` arrays (directly or via barrel exports)
+- [ ] Registered in `allToolDefinitions` (`src/mcp-server/tools/definitions/index.ts`)
+- [ ] Elevations come from `getElevationSampler().sample()`; every value with data carries its `dataset`, plus `resolution_m` where the dataset has a single resolution
+- [ ] `attribution` written with `ctx.enrich` right after sampling, before any `ctx.fail`, so every success path carries its `Sources:` line
+- [ ] Coordinates use `PointSchema`, every tool takes `SourceSchema`, and optional inputs are wrapped in `blankAsUnset`
+- [ ] A changed contract is reflected in `docs/design.md` and the README Capability reference
 - [ ] Tests use `createMockContext()` from `@cyanheads/mcp-ts-core/testing`
 - [ ] `.codex-plugin/plugin.json` populated — `name`, `version`, `description`, `repository`, `license` from `package.json`; `interface.displayName` = the unscoped repo name (never the npm scope — `lint:packaging` enforces this); `interface.shortDescription` from `package.json` description
 - [ ] `.codex-plugin/mcp.json` updated — server name key is the unscoped repo name; every user-supplied variable (API key, contact email, instance URL) is listed in `env_vars` so Codex forwards it from the user's environment. Never write `"KEY": ""` into `env` — an empty value replaces the user's exported key and is read as unset

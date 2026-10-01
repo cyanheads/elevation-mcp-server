@@ -2,7 +2,7 @@
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "elevation-mcp-server",
   "version": "0.1.0",
-  "description": "Terrain analysis over elevation data: route ascent/descent profiles, bounding-box elevation grids, line-of-sight clearance, and US 3DEP point elevation.",
+  "description": "Look up elevation worldwide, profile route ascent/descent, grid areas, check terrain line of sight.",
   "author": {
     "name": "cyanheads",
     "email": "casey@caseyjhand.com",
@@ -11,12 +11,27 @@
   "homepage": "https://github.com/cyanheads/elevation-mcp-server#readme",
   "repository": "https://github.com/cyanheads/elevation-mcp-server",
   "license": "Apache-2.0",
-  "keywords": ["mcp", "mcp-server", "model-context-protocol", "elevation", "terrain", "geospatial", "usgs-3dep"],
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "typescript",
+    "elevation",
+    "terrain",
+    "topography",
+    "dem",
+    "geospatial",
+    "usgs-3dep",
+    "srtm",
+    "opentopodata",
+    "elevation-profile",
+    "line-of-sight"
+  ],
   "userConfig": {
     "OPENTOPODATA_BASE_URL": {
       "type": "string",
       "title": "Open Topo Data base URL",
-      "description": "Base URL of a self-hosted Open Topo Data instance serving the srtm30m and mapzen datasets. Leave blank to use the public instance at https://api.opentopodata.org.",
+      "description": "Base URL of a self-hosted Open Topo Data instance, used outside USGS 3DEP coverage. It must serve the srtm30m and mapzen datasets and accept at least 100 locations per request. Leave blank to use the public instance at https://api.opentopodata.org, paced under its published limits.",
       "default": ""
     }
   },
