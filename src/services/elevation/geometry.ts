@@ -298,6 +298,15 @@ export function effectiveEarthRadius(model: EarthModel): number | undefined {
 }
 
 /**
+ * Longest sightline, in meters, that line of sight evaluates. At this length
+ * the parabolic {@link curvatureBulge} overstates the true arc height above the
+ * chord by about 10 m at the midpoint (D⁴/(384·R³) with κ = 0, less with
+ * refraction), against a bulge of about 19.6 km; past it the error grows with
+ * D⁴, and near the antipode the bulge is meaningless.
+ */
+export const MAX_SIGHTLINE_LENGTH_M = 1_000_000;
+
+/**
  * How far the curved surface rises above the straight chord between the
  * endpoints, in meters, at `distance_m` along a line `total_m` long:
  * d·(D − d) / (2·R_eff). 0 for `flat`. The parabolic approximation holds for

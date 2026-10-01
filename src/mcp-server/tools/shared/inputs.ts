@@ -73,12 +73,13 @@ export const PointSchema = z.preprocess(
     .describe('A point as {lat, lon} in decimal degrees (WGS84).'),
 );
 
-const SOURCE_ALIASES: Readonly<Record<string, SourceMode>> = {
-  '3dep': 'usgs_3dep',
-  usgs: 'usgs_3dep',
-  epqs: 'usgs_3dep',
-  open_topo_data: 'opentopodata',
-};
+/** A `Map`, so a caller's `constructor` or `__proto__` matches nothing and stays a string. */
+const SOURCE_ALIASES: ReadonlyMap<string, SourceMode> = new Map([
+  ['3dep', 'usgs_3dep'],
+  ['usgs', 'usgs_3dep'],
+  ['epqs', 'usgs_3dep'],
+  ['open_topo_data', 'opentopodata'],
+]);
 
 /**
  * Blank → unset (so the default applies); otherwise trim, lowercase, turn
@@ -89,7 +90,7 @@ function normalizeSource(value: unknown): unknown {
   if (value === '') return;
   if (typeof value !== 'string') return value;
   const key = value.trim().toLowerCase().replace(/[-\s]/g, '_');
-  return SOURCE_ALIASES[key] ?? key;
+  return SOURCE_ALIASES.get(key) ?? key;
 }
 
 /** The `source` input every tool takes; defaults to `auto`. */

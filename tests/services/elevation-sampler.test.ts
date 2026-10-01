@@ -607,6 +607,93 @@ describe('ElevationSampler.sample: fail fast', () => {
   });
 });
 
+describe('ElevationSampler.sample: 3DEP lookups per call', () => {
+  /** `count` distinct points inside the 3DEP envelope. */
+  const column = (count: number): LatLon[] =>
+    Array.from({ length: count }, (_, i) => ({ lat: 40 + i / 1_000, lon: -105 }));
+
+  it('keeps at most 6 lookups of one call outstanding, starting the next as one settles', async () => {
+    let inFlight = 0;
+    let peak = 0;
+    const { callsTo, sampler } = harness({
+      epqs: async () => {
+        inFlight++;
+        peak = Math.max(peak, inFlight);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        inFlight--;
+        return epqsResponse(epqsHitBody());
+      },
+    });
+    const samples = await sampler.sample(column(20), 'usgs_3dep', createMockContext());
+
+    expect(peak).toBe(6);
+    expect(callsTo('epqs')).toHaveLength(20);
+    expect(samples.every((sample) => sample.dataset === 'usgs_3dep')).toBe(true);
+  });
+
+  it('sends no further lookup once one fails', async () => {
+    const { callsTo, sampler } = harness({
+      epqs: epqsByPoint((point, request) =>
+        point.lat === 40 ? epqsResponse('{"message":"Forbidden"}', 403) : hangUntilAborted(request),
+      ),
+    });
+    const error = await sampler
+      .sample(column(20), 'usgs_3dep', createMockContext())
+      .catch((e: unknown) => e);
+
+    expect(mcpData(error)).toMatchObject({ reason: 'usgs_unavailable', status: 403 });
+    expect(callsTo('epqs')).toHaveLength(6);
+  });
+
+  describe('on the production pacer', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('answers a 1-point call started 100 ms after a 250-point call in under 2 s', async () => {
+      const http = createFetchMock([
+        epqsRoute(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 200));
+          return epqsResponse(epqsHitBody());
+        }),
+      ]);
+      const epqs = new UsgsEpqsClient({ fetch: http.fetch });
+      const sampler = new ElevationSampler({
+        epqs,
+        openTopoData: new OpenTopoDataClient({
+          baseUrl: OTD_PUBLIC_BASE_URL,
+          fetch: http.fetch,
+          pacer: permissivePacer(),
+          dailyPacer: permissivePacer(),
+        }),
+      });
+      try {
+        const large = sampler.sample(column(250), 'usgs_3dep', createMockContext());
+        large.catch(() => undefined);
+        await vi.advanceTimersByTimeAsync(100);
+
+        const startedAt = Date.now();
+        const small = await settleWithFakeTimers(
+          sampler.sample([SEATTLE], 'usgs_3dep', createMockContext()),
+          { stepMs: 50 },
+        );
+        expect(small.status).toBe('fulfilled');
+        expect(Date.now() - startedAt).toBeLessThan(2_000);
+
+        const rest = await settleWithFakeTimers(large, { stepMs: 50 });
+        if (rest.status === 'rejected') throw rest.reason;
+        expect(rest.value.filter((sample) => sample.dataset === 'usgs_3dep')).toHaveLength(250);
+        expect(http.calls).toHaveLength(251);
+      } finally {
+        epqs.dispose();
+      }
+    });
+  });
+});
+
 describe('ElevationSampler.sample: sampling budget', () => {
   beforeEach(() => {
     vi.useFakeTimers();

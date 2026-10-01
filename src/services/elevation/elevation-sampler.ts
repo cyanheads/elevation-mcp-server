@@ -1,7 +1,8 @@
 /**
  * @fileoverview Samples terrain elevation at a list of points: dedupes,
  * routes each point to USGS 3DEP or Open Topo Data, falls back on coverage
- * misses only, enforces the per-call budget, and normalizes failures. Also
+ * misses only, bounds each call's outstanding 3DEP lookups, enforces the
+ * per-call budget, and normalizes failures. Also
  * holds the init/accessor/dispose lifecycle for the elevation services.
  * @module services/elevation/elevation-sampler
  */
@@ -10,7 +11,7 @@ import type { Context } from '@cyanheads/mcp-ts-core';
 import { McpError, timeout } from '@cyanheads/mcp-ts-core/errors';
 import type { ServerConfig } from '@/config/server-config.js';
 import { OpenTopoDataClient } from '@/services/opentopodata/opentopodata-client.js';
-import { UsgsEpqsClient } from '@/services/usgs-epqs/usgs-epqs-client.js';
+import { EPQS_MAX_CONCURRENT, UsgsEpqsClient } from '@/services/usgs-epqs/usgs-epqs-client.js';
 import type { Dataset, ElevationValue, LatLon, Sample, SourceMode } from './types.js';
 import { roundTo } from './units.js';
 
@@ -19,6 +20,15 @@ export const SAMPLING_BUDGET_MS = 45_000;
 
 /** Open Topo Data's per-request location limit. */
 export const OPENTOPODATA_CHUNK_SIZE = 100;
+
+/**
+ * EPQS lookups one call keeps outstanding, the next submitted as one settles.
+ * The EPQS pacer is shared by every call and serves its queue in order, so a
+ * call that queued all its lookups at once would hold a later call behind every
+ * one of them. Equal to the pacer's in-flight ceiling, so a call running alone
+ * still fills every slot.
+ */
+const EPQS_CALL_WINDOW = EPQS_MAX_CONCURRENT;
 
 /** An upstream provider, named by the `source` value that selects it alone. */
 type Provider = Exclude<SourceMode, 'auto'>;
@@ -127,22 +137,20 @@ export class ElevationSampler {
           entry.needsOpenTopoData = true;
         }
       }
-      await Promise.all(
-        epqsEntries.map(async (entry) => {
-          const result = await this.#epqs.lookup(entry.point, {
-            ctx,
-            signal,
-            budgetMs: remainingMs(),
-          });
-          if (result.kind === 'hit') {
-            stats.epqsHits++;
-            entry.answer = result.value;
-          } else {
-            stats.epqsMisses++;
-            if (mode === 'auto') entry.needsOpenTopoData = true;
-          }
-        }),
-      );
+      await forEachWindowed(epqsEntries, EPQS_CALL_WINDOW, async (entry) => {
+        const result = await this.#epqs.lookup(entry.point, {
+          ctx,
+          signal,
+          budgetMs: remainingMs(),
+        });
+        if (result.kind === 'hit') {
+          stats.epqsHits++;
+          entry.answer = result.value;
+        } else {
+          stats.epqsMisses++;
+          if (mode === 'auto') entry.needsOpenTopoData = true;
+        }
+      });
 
       // Phase 2: Open Topo Data for out-of-envelope points and 3DEP misses, in input order.
       const openTopoDataEntries = entries.filter((entry) => entry.needsOpenTopoData);
@@ -219,6 +227,22 @@ function dedupe(points: readonly LatLon[]): { byInput: Entry[]; entries: Entry[]
     return entry;
   });
   return { entries, byInput };
+}
+
+/**
+ * Runs `task` over `items` in order with at most `limit` running, starting the
+ * next item as one settles. Rejects with the first failure.
+ */
+async function forEachWindowed<T>(
+  items: readonly T[],
+  limit: number,
+  task: (item: T) => Promise<void>,
+): Promise<void> {
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) await task(items[next++] as T);
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
 }
 
 function chunk<T>(items: readonly T[], size: number): T[][] {

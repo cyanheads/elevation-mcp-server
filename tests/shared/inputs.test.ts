@@ -165,6 +165,16 @@ describe('SourceSchema', () => {
     expect(SourceSchema.safeParse(value).success).toBe(false);
   });
 
+  it.each([
+    ['constructor', 'constructor'],
+    [' Constructor ', 'constructor'],
+    ['__proto__', '__proto__'],
+  ])('rejects %j as the unknown name %j, never a value inherited from Object', (value, name) => {
+    const result = SourceSchema.safeParse(value, { reportInput: true });
+    expect(result.success).toBe(false);
+    expect(result.error?.issues[0]?.input).toBe(name);
+  });
+
   it('advertises the three values and the auto default', () => {
     const schema = z.toJSONSchema(SourceSchema, { io: 'input' }) as {
       default: string;

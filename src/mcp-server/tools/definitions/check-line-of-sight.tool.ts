@@ -22,6 +22,7 @@ import {
   EARTH_MODELS,
   effectiveEarthRadius,
   lineOfSight,
+  MAX_SIGHTLINE_LENGTH_M,
   refractionCoefficient,
   resamplePath,
   type SightlineEndpoint,
@@ -165,6 +166,14 @@ export const checkLineOfSightTool = tool('elevation_check_line_of_sight', {
       severity: 'notice',
     },
     {
+      reason: 'sightline_too_long',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'Observer and target are more than 1,000 km apart.',
+      recovery:
+        'Observer and target are more than 1,000 km apart, past the longest sightline this tool evaluates. Re-call elevation_check_line_of_sight with points under 1,000 km apart, or call elevation_get_profile on the same two points for the terrain along a longer route.',
+      severity: 'notice',
+    },
+    {
       reason: 'endpoint_no_data',
       code: JsonRpcErrorCode.NotFound,
       when: "The observer's or target's own sample has no data, so its sightline height is unknown.",
@@ -234,6 +243,13 @@ export const checkLineOfSightTool = tool('elevation_check_line_of_sight', {
         'same_endpoints',
         `Observer and target are ${roundTo(line.total_distance_m, 2)} m apart; a sightline needs at least 1 m.`,
         { distance_m: roundTo(line.total_distance_m, 2) },
+      );
+    }
+    if (line.total_distance_m > MAX_SIGHTLINE_LENGTH_M) {
+      throw ctx.fail(
+        'sightline_too_long',
+        `Observer and target are ${roundTo(line.total_distance_m / 1_000, 3)} km apart; a sightline can be at most 1,000 km.`,
+        { distance_m: roundTo(line.total_distance_m, 1) },
       );
     }
 

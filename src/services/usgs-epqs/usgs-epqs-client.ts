@@ -35,11 +35,14 @@ const ATTEMPT_TIMEOUT_MS = 10_000;
 const MAX_BODY_BYTES = 16 * 1024;
 const LOG_EXCERPT_CHARS = 200;
 
+/** EPQS requests the production pacer keeps in flight, across every call. */
+export const EPQS_MAX_CONCURRENT = 6;
+
 /** Builds the production EPQS pacer: 6 in flight, 10 starts a second, 429 cooldown. */
 function createEpqsPacer(): Pacer {
   return createPacer({
     name: 'usgs-epqs',
-    maxConcurrent: 6,
+    maxConcurrent: EPQS_MAX_CONCURRENT,
     limits: [{ requests: 10, perMs: 1_000 }],
     cooldown: { baseMs: 2_000, maxMs: 30_000 },
   });

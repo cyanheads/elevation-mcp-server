@@ -1,6 +1,7 @@
 /**
  * @fileoverview Tests for elevation_check_line_of_sight: input validation,
- * the two handler reasons on the wire (same_endpoints, endpoint_no_data), the
+ * the three handler reasons on the wire (same_endpoints, sightline_too_long,
+ * endpoint_no_data), the
  * three verdicts with their limiting point and first obstruction, earth
  * models, the sea-surface rule, the required attribution on every success
  * path, each notice fragment, and format() parity.
@@ -14,7 +15,7 @@ import { checkLineOfSightTool } from '@/mcp-server/tools/definitions/check-line-
 import { allToolDefinitions } from '@/mcp-server/tools/definitions/index.js';
 import { MAPZEN_ATTRIBUTION, NO_DATASET_ATTRIBUTION } from '@/services/elevation/attribution.js';
 import { disposeElevationServices } from '@/services/elevation/elevation-sampler.js';
-import { METERS_PER_DEGREE, roundTo } from '@/services/elevation/units.js';
+import { EARTH_RADIUS_M, METERS_PER_DEGREE, roundTo } from '@/services/elevation/units.js';
 import { epqsHitBody, epqsResponse } from '../fixtures/epqs.js';
 import { epqsByPoint, otdByPoint } from '../fixtures/harness.js';
 import type { OtdAnswer } from '../fixtures/opentopodata.js';
@@ -103,10 +104,11 @@ describe('elevation_check_line_of_sight definition', () => {
     expect(checkLineOfSightTool.auth).toEqual(['tool:elevation_check_line_of_sight:read']);
   });
 
-  it('declares the two handler reasons and the six service reasons, each recovery naming this tool', () => {
+  it('declares the three handler reasons and the six service reasons, each recovery naming this tool', () => {
     const errors = checkLineOfSightTool.errors ?? [];
     expect(errors.map((error) => [error.reason, error.code])).toEqual([
       ['same_endpoints', JsonRpcErrorCode.ValidationError],
+      ['sightline_too_long', JsonRpcErrorCode.ValidationError],
       ['endpoint_no_data', JsonRpcErrorCode.NotFound],
       ['usgs_unavailable', JsonRpcErrorCode.ServiceUnavailable],
       ['opentopodata_unavailable', JsonRpcErrorCode.ServiceUnavailable],
@@ -607,6 +609,46 @@ describe('same_endpoints on the wire', () => {
       samples: 3,
     });
     expect(result.isError).toBeUndefined();
+  });
+});
+
+describe('sightline_too_long on the wire', () => {
+  it('rejects antipodal points and sends nothing upstream', async () => {
+    const http = useUpstreams();
+    const result = await run({ observer: { lat: 0, lon: 0 }, target: { lat: 0, lon: 180 } });
+    const error = expectDeclaredError(
+      checkLineOfSightTool,
+      result,
+      'sightline_too_long',
+      JsonRpcErrorCode.ValidationError,
+    );
+    const distance = Math.PI * EARTH_RADIUS_M;
+    expect(error.data).toMatchObject({ distance_m: roundTo(distance, 1) });
+    expect(error.message).toBe(
+      `Observer and target are ${roundTo(distance / 1_000, 3)} km apart; a sightline can be at most 1,000 km.`,
+    );
+    expect(http.calls).toHaveLength(0);
+  });
+
+  it('rejects a line just over 1,000 km and sends nothing upstream', async () => {
+    const http = useUpstreams();
+    const result = await run(equator(1_000_010, { samples: 3 }));
+    const error = expectDeclaredError(
+      checkLineOfSightTool,
+      result,
+      'sightline_too_long',
+      JsonRpcErrorCode.ValidationError,
+    );
+    expect(error.data).toMatchObject({ distance_m: 1_000_010 });
+    expect(error.message).toContain('1000.01 km apart');
+    expect(http.calls).toHaveLength(0);
+  });
+
+  it('evaluates a line just under 1,000 km', async () => {
+    useUpstreams({ otd: otdByPoint(() => srtm(5)) });
+    const result = await run(equator(999_990, { samples: 3 }));
+    expect(result.isError).toBeUndefined();
+    expect(structured(result).distance_m).toBeCloseTo(999_990, 0);
   });
 });
 
