@@ -647,14 +647,14 @@ describe('every declared reason on the wire', () => {
     );
   });
 
-  it('opentopodata_rate_limited: a 429 with a long Retry-After, carrying retryAfter', async () => {
+  it('opentopodata_rate_limited: a 429 with a long Retry-After, carrying retryAfter in seconds', async () => {
     useUpstreams({ otd: () => otdResponse(OTD_429_BODY, 429, { 'retry-after': '30' }) });
     const error = expectDeclaredError(
       await run({ points: [LONDON], source: 'opentopodata' }),
       'opentopodata_rate_limited',
       JsonRpcErrorCode.RateLimited,
     );
-    expect(error.data).toMatchObject({ retryable: true, retryAfter: '30' });
+    expect(error.data).toMatchObject({ retryable: true, retryAfter: 30 });
     expect(JSON.stringify(error)).not.toContain('Rate limit exceeded.');
   });
 

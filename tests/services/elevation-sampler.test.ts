@@ -622,9 +622,15 @@ describe('ElevationSampler.sample: sampling budget', () => {
     );
 
     expect((error as McpError).code).toBe(JsonRpcErrorCode.Timeout);
-    expect(mcpData(error)).toMatchObject({ reason: 'sampling_deadline_exceeded', budgetMs: 800 });
+    expect(mcpData(error)).toMatchObject({
+      reason: 'sampling_deadline_exceeded',
+      budgetMs: 800,
+      provider: 'usgs_3dep',
+    });
     expect(mcpData(error).elapsedMs).toBeTypeOf('number');
-    expect((error as McpError).message).toMatch(/ran out of its 0\.8 s budget after \d+ ms/);
+    expect((error as McpError).message).toMatch(
+      /ran out of its 0\.8 s budget after \d+ ms, waiting on USGS 3DEP\.$/,
+    );
     expect(mcpData((error as McpError).cause)).toMatchObject({ reason: 'retry_deadline_exceeded' });
   });
 
@@ -638,8 +644,10 @@ describe('ElevationSampler.sample: sampling budget', () => {
     expect(mcpData(error)).toMatchObject({
       reason: 'sampling_deadline_exceeded',
       budgetMs: 45_000,
+      provider: 'opentopodata',
     });
     expect((error as McpError).message).toContain('45 s budget');
+    expect((error as McpError).message).toMatch(/, waiting on Open Topo Data\.$/);
     expect(mcpData(error).elapsedMs as number).toBeGreaterThanOrEqual(45_000);
     expect(Date.now() - startedAt).toBeGreaterThanOrEqual(45_000);
   });
@@ -671,7 +679,12 @@ describe('ElevationSampler.sample: sampling budget', () => {
       sampler.sample([SEATTLE], 'auto', createMockContext()),
     );
 
-    expect(mcpData(error)).toMatchObject({ reason: 'sampling_deadline_exceeded', budgetMs: 5_000 });
+    expect(mcpData(error)).toMatchObject({
+      reason: 'sampling_deadline_exceeded',
+      budgetMs: 5_000,
+      provider: 'opentopodata',
+    });
+    expect((error as McpError).message).toContain('waiting on Open Topo Data');
     // 3 s spent on 3DEP leaves 2 s for Open Topo Data; a fresh 5 s would end near 8 s.
     expect(mcpData(error).elapsedMs as number).toBeGreaterThanOrEqual(5_000);
     expect(mcpData(error).elapsedMs as number).toBeLessThan(5_600);
@@ -697,7 +710,9 @@ describe('ElevationSampler.sample: sampling budget', () => {
       reason: 'sampling_deadline_exceeded',
       budgetMs: 45_000,
       elapsedMs: 50_000,
+      provider: 'usgs_3dep',
     });
+    expect((error as McpError).message).toContain('waiting on USGS 3DEP');
     expect((error as McpError).cause).toBeUndefined();
     expect(callsTo('otd')).toHaveLength(0);
   });
@@ -720,7 +735,10 @@ describe('ElevationSampler.sample: sampling budget', () => {
       const error = await sampler
         .sample([SEATTLE], 'usgs_3dep', createMockContext())
         .catch((e: unknown) => e);
-      expect(mcpData(error)).toMatchObject({ reason: 'sampling_deadline_exceeded' });
+      expect(mcpData(error)).toMatchObject({
+        reason: 'sampling_deadline_exceeded',
+        provider: 'usgs_3dep',
+      });
       expect(mcpData((error as McpError).cause)).toMatchObject({ reason: 'pacer_shed' });
     } finally {
       release.resolve();
@@ -746,7 +764,11 @@ describe('ElevationSampler.sample: sampling budget', () => {
       .sample([SYDNEY], 'opentopodata', createMockContext())
       .catch((e: unknown) => e);
 
-    expect(mcpData(error)).toMatchObject({ reason: 'sampling_deadline_exceeded', budgetMs: 1_000 });
+    expect(mcpData(error)).toMatchObject({
+      reason: 'sampling_deadline_exceeded',
+      budgetMs: 1_000,
+      provider: 'opentopodata',
+    });
     expect(mcpData((error as McpError).cause)).toMatchObject({ reason: 'pacer_shed' });
     expect(http.calls).toHaveLength(1);
   });

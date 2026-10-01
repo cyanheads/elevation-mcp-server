@@ -179,9 +179,14 @@ describe.each(SPECS)('$label service failures on the wire', ({ tool, input }) =>
     );
     expect(JSON.stringify(error)).not.toContain('Injected');
     expect(JSON.stringify(result.content)).not.toContain('Injected');
+    expect(error.message).toBe(
+      'The Open Topo Data instance answered with a dataset this server did not ask for (result 0; it requested srtm30m,mapzen).',
+    );
+    expect(error.data).not.toHaveProperty('detail');
+    expect(error.data).not.toHaveProperty('operation');
   });
 
-  it('opentopodata_rate_limited: a 429 with a long Retry-After, carrying retryAfter', async () => {
+  it('opentopodata_rate_limited: a 429 with a long Retry-After, carrying retryAfter in seconds', async () => {
     useUpstreams({ otd: () => otdResponse(OTD_429_BODY, 429, { 'retry-after': '30' }) });
     const error = expectDeclaredError(
       tool,
@@ -189,7 +194,7 @@ describe.each(SPECS)('$label service failures on the wire', ({ tool, input }) =>
       'opentopodata_rate_limited',
       JsonRpcErrorCode.RateLimited,
     );
-    expect(error.data).toMatchObject({ retryable: true, retryAfter: '30' });
+    expect(error.data).toMatchObject({ retryable: true, retryAfter: 30 });
     expect(JSON.stringify(error)).not.toContain('Rate limit exceeded.');
   });
 

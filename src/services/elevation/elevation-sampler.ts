@@ -20,6 +20,14 @@ export const SAMPLING_BUDGET_MS = 45_000;
 /** Open Topo Data's per-request location limit. */
 export const OPENTOPODATA_CHUNK_SIZE = 100;
 
+/** An upstream provider, named by the `source` value that selects it alone. */
+type Provider = Exclude<SourceMode, 'auto'>;
+
+const PROVIDER_NAMES: Readonly<Record<Provider, string>> = {
+  usgs_3dep: 'USGS 3DEP',
+  opentopodata: 'Open Topo Data',
+};
+
 interface Box {
   east: number;
   north: number;
@@ -71,7 +79,8 @@ export interface ElevationSamplerOptions {
  *   `opentopodata_daily_limit`, `opentopodata_config_rejected` from the clients,
  *   unchanged (`data.reason` set);
  * - `Timeout`, `reason: 'sampling_deadline_exceeded'` when the budget ran out
- *   in a retry ladder or a provider queue (cause chained);
+ *   in a retry ladder or a provider queue (cause chained), with `data.provider`
+ *   (`usgs_3dep` or `opentopodata`) naming the phase it ran out in;
  * - `InternalError` for an Open Topo Data 400 this server provoked;
  * - the abort reason, unchanged, when `ctx.signal` was aborted.
  */
@@ -96,6 +105,7 @@ export class ElevationSampler {
     const { entries, byInput } = dedupe(points);
     const failFast = new AbortController();
     const signal = AbortSignal.any([ctx.signal, failFast.signal]);
+    let waitingOn: Provider = 'usgs_3dep';
     const stats = {
       epqsHits: 0,
       epqsMisses: 0,
@@ -137,7 +147,8 @@ export class ElevationSampler {
       // Phase 2: Open Topo Data for out-of-envelope points and 3DEP misses, in input order.
       const openTopoDataEntries = entries.filter((entry) => entry.needsOpenTopoData);
       if (openTopoDataEntries.length > 0) {
-        if (remainingMs() === 0) throw this.#deadlineExceeded(startedAt);
+        if (remainingMs() === 0) throw this.#deadlineExceeded(startedAt, waitingOn);
+        waitingOn = 'opentopodata';
         const chunks = chunk(openTopoDataEntries, OPENTOPODATA_CHUNK_SIZE);
         stats.openTopoDataRequests = chunks.length;
         stats.openTopoDataPoints = openTopoDataEntries.length;
@@ -157,7 +168,7 @@ export class ElevationSampler {
     } catch (error) {
       failFast.abort();
       if (ctx.signal.aborted) throw error;
-      if (isBudgetExpiry(error)) throw this.#deadlineExceeded(startedAt, error);
+      if (isBudgetExpiry(error)) throw this.#deadlineExceeded(startedAt, waitingOn, error);
       throw error;
     }
 
@@ -172,11 +183,11 @@ export class ElevationSampler {
     return byInput.map(toSample);
   }
 
-  #deadlineExceeded(startedAt: number, cause?: unknown): McpError {
+  #deadlineExceeded(startedAt: number, provider: Provider, cause?: unknown): McpError {
     const elapsedMs = this.#now() - startedAt;
     return timeout(
-      `Elevation sampling ran out of its ${this.#budgetMs / 1_000} s budget after ${elapsedMs} ms.`,
-      { reason: 'sampling_deadline_exceeded', budgetMs: this.#budgetMs, elapsedMs },
+      `Elevation sampling ran out of its ${this.#budgetMs / 1_000} s budget after ${elapsedMs} ms, waiting on ${PROVIDER_NAMES[provider]}.`,
+      { reason: 'sampling_deadline_exceeded', budgetMs: this.#budgetMs, elapsedMs, provider },
       cause === undefined ? undefined : { cause },
     );
   }

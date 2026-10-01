@@ -104,9 +104,11 @@ interface DailyLimitRefusal {
  *
  * `lookup` resolves to one hit or miss per point, in order. It rejects with:
  * - `ServiceUnavailable`, `reason: 'opentopodata_unavailable'` after the ladder
- *   (5xx, network error, per-attempt timeout, unreadable or mis-shaped 200);
+ *   (5xx, network error, per-attempt timeout, unreadable or mis-shaped 200,
+ *   whose problem the message names);
  * - `RateLimited`, `reason: 'opentopodata_rate_limited'` when 429s outlast the
- *   ladder or carry a `Retry-After` above 8 s (`data.retryAfter` when sent);
+ *   ladder or carry a `Retry-After` above 8 s (`data.retryAfter` in seconds
+ *   when the header was sent and parses);
  * - `RateLimited`, `reason: 'opentopodata_daily_limit'`, `retryable: false`,
  *   `data.retryAfter` (seconds) when the daily pacer refuses; nothing is sent;
  * - `ConfigurationError`, `reason: 'opentopodata_config_rejected'` on 401, 403,
@@ -278,7 +280,7 @@ function parseResults(
   const { results } = parsed;
   if (results.length !== sent.length) {
     throw unavailable(
-      `${SERVICE} returned ${results.length} results for ${sent.length} locations.`,
+      `${SERVICE} returned a results list whose length (${results.length}) does not match the number of locations sent (${sent.length}).`,
     );
   }
   return sent.map((location, index): ProviderLookup => {
@@ -300,7 +302,9 @@ function parseResults(
         index,
         dataset: String(dataset).slice(0, LOG_EXCERPT_CHARS),
       });
-      throw unavailable(`${SERVICE} result ${index} names a dataset this server did not request.`);
+      throw unavailable(
+        `The ${SERVICE} instance answered with a dataset this server did not ask for (result ${index}; it requested ${DATASET_STACK}).`,
+      );
     }
     const answered: Dataset = dataset;
     return {
@@ -373,20 +377,37 @@ function dailyLimitError(retryAfter: number): McpError {
   );
 }
 
-/** A transient failure inside the ladder; mapped to `opentopodata_unavailable` if it outlasts it. */
+/**
+ * A transient failure inside the ladder; mapped to `opentopodata_unavailable`
+ * if it outlasts it. `data.detail` carries the message through `withRetry`'s
+ * exhausted-ladder wrapper so the final error can name the problem.
+ */
 function unavailable(message: string, cause?: unknown): McpError {
   return serviceUnavailable(
     message,
-    { reason: 'opentopodata_unavailable' },
+    { reason: 'opentopodata_unavailable', detail: message },
     cause === undefined ? undefined : { cause },
   );
+}
+
+/**
+ * A `Retry-After` header value in whole seconds: delta-seconds as given, an
+ * HTTP-date as the seconds left until it (0 once past), anything else undefined.
+ */
+function retryAfterSeconds(value: unknown): number | undefined {
+  if (typeof value !== 'string') return;
+  if (/^\d+$/.test(value)) return Number(value);
+  const at = Date.parse(value);
+  return Number.isNaN(at) ? undefined : Math.max(0, Math.ceil((at - Date.now()) / 1_000));
 }
 
 /**
  * Maps the error that ended the retry ladder. Cancellation, the retry deadline,
  * a request-pacer shed, and errors already carrying their final reason (config
  * rejection, daily limit, the built-wrongly 400) pass through; a 429 becomes
- * `opentopodata_rate_limited`; everything else `opentopodata_unavailable`.
+ * `opentopodata_rate_limited`; everything else `opentopodata_unavailable`. The
+ * final error's data is built fresh, so the wrapper's `operation` and the
+ * ladder's `detail` never reach the caller.
  */
 function toOpenTopoDataError(error: unknown, signal: AbortSignal): unknown {
   if (signal.aborted) return error;
@@ -402,23 +423,26 @@ function toOpenTopoDataError(error: unknown, signal: AbortSignal): unknown {
     }
     if (error.code === JsonRpcErrorCode.InternalError) return error;
     if (error.code === JsonRpcErrorCode.RateLimited) {
-      const retryAfter = error.data?.retryAfter;
+      const retryAfter = retryAfterSeconds(error.data?.retryAfter);
       return rateLimited(
         `${SERVICE} kept answering HTTP 429 (rate limited).`,
         {
           reason: 'opentopodata_rate_limited',
           retryable: true,
-          ...((typeof retryAfter === 'number' || typeof retryAfter === 'string') && { retryAfter }),
+          ...(retryAfter !== undefined && { retryAfter }),
         },
         { cause: error },
       );
     }
   }
-  const status = error instanceof McpError ? error.data?.status : undefined;
+  const data = error instanceof McpError ? error.data : undefined;
+  const status = data?.status;
   return serviceUnavailable(
-    typeof status === 'number'
-      ? `${SERVICE} failed with HTTP ${status}.`
-      : `${SERVICE} did not answer.`,
+    typeof data?.detail === 'string'
+      ? data.detail
+      : typeof status === 'number'
+        ? `${SERVICE} failed with HTTP ${status}.`
+        : `${SERVICE} did not answer.`,
     {
       reason: 'opentopodata_unavailable',
       retryable: defaultIsTransient(error),

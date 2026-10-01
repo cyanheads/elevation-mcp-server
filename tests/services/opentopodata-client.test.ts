@@ -250,17 +250,42 @@ describe('OpenTopoDataClient mis-shaped 200 responses', () => {
     ...overrides,
   });
 
+  const NOT_OK = 'Open Topo Data returned a response without an OK status and a results list.';
+  const NOT_JSON = 'Open Topo Data returned a response that is not JSON.';
+  const WRONG_LOCATION =
+    'Open Topo Data result 0 does not match the location sent at that position.';
+  const NON_NUMERIC = 'Open Topo Data result 0 carries a non-numeric elevation.';
+  const WRONG_DATASET =
+    'The Open Topo Data instance answered with a dataset this server did not ask for (result 0; it requested srtm30m,mapzen).';
+
   it.each([
-    ['status other than OK', JSON.stringify({ results: [result()], status: 'INVALID_REQUEST' })],
-    ['no status', JSON.stringify({ results: [result()] })],
-    ['results that is not an array', JSON.stringify({ results: {}, status: 'OK' })],
-    ['no results member', JSON.stringify({ status: 'OK' })],
-    ['too few results', JSON.stringify({ results: [], status: 'OK' })],
-    ['too many results', JSON.stringify({ results: [result(), result()], status: 'OK' })],
-    ['a result that is not an object', JSON.stringify({ results: [7], status: 'OK' })],
+    [
+      'status other than OK',
+      JSON.stringify({ results: [result()], status: 'INVALID_REQUEST' }),
+      NOT_OK,
+    ],
+    ['no status', JSON.stringify({ results: [result()] }), NOT_OK],
+    ['results that is not an array', JSON.stringify({ results: {}, status: 'OK' }), NOT_OK],
+    ['no results member', JSON.stringify({ status: 'OK' }), NOT_OK],
+    [
+      'too few results',
+      JSON.stringify({ results: [], status: 'OK' }),
+      'Open Topo Data returned a results list whose length (0) does not match the number of locations sent (1).',
+    ],
+    [
+      'too many results',
+      JSON.stringify({ results: [result(), result()], status: 'OK' }),
+      'Open Topo Data returned a results list whose length (2) does not match the number of locations sent (1).',
+    ],
+    [
+      'a result that is not an object',
+      JSON.stringify({ results: [7], status: 'OK' }),
+      WRONG_LOCATION,
+    ],
     [
       'a result with no location',
       JSON.stringify({ results: [{ dataset: 'srtm30m', elevation: 5 }], status: 'OK' }),
+      WRONG_LOCATION,
     ],
     [
       'a latitude echo more than 1e-6 off',
@@ -268,6 +293,7 @@ describe('OpenTopoDataClient mis-shaped 200 responses', () => {
         results: [result({ location: { lat: SEATTLE.lat + 1e-5, lng: SEATTLE.lon } })],
         status: 'OK',
       }),
+      WRONG_LOCATION,
     ],
     [
       'a longitude echo more than 1e-6 off',
@@ -275,6 +301,7 @@ describe('OpenTopoDataClient mis-shaped 200 responses', () => {
         results: [result({ location: { lat: SEATTLE.lat, lng: SEATTLE.lon + 1e-5 } })],
         status: 'OK',
       }),
+      WRONG_LOCATION,
     ],
     [
       'a location echoed with string coordinates',
@@ -282,10 +309,12 @@ describe('OpenTopoDataClient mis-shaped 200 responses', () => {
         results: [result({ location: { lat: '47.6062', lng: '-122.3321' } })],
         status: 'OK',
       }),
+      WRONG_LOCATION,
     ],
     [
       'a string elevation',
       JSON.stringify({ results: [result({ elevation: '59' })], status: 'OK' }),
+      NON_NUMERIC,
     ],
     [
       'a result with no elevation member',
@@ -293,27 +322,43 @@ describe('OpenTopoDataClient mis-shaped 200 responses', () => {
         results: [{ dataset: 'srtm30m', location: { lat: SEATTLE.lat, lng: SEATTLE.lon } }],
         status: 'OK',
       }),
+      NON_NUMERIC,
     ],
     [
       'a dataset that was not requested',
       JSON.stringify({ results: [result({ dataset: 'srtm90m' })], status: 'OK' }),
+      WRONG_DATASET,
     ],
     [
       'a hit with no dataset',
       JSON.stringify({ results: [result({ dataset: undefined })], status: 'OK' }),
+      WRONG_DATASET,
     ],
-    ['a body that is not JSON', '<html>Bad gateway</html>'],
-    ['a JSON array', '[]'],
-    ['a JSON null', 'null'],
-    ['an empty body', ''],
-  ])('retries, then fails opentopodata_unavailable on %s', async (_name, body) => {
-    const { client, http } = setup(() => otdResponse(body));
-    const error = await rejectionWithFakeTimers(client.lookup([SEATTLE], providerOptions()));
+    ['a body that is not JSON', '<html>Bad gateway</html>', NOT_JSON],
+    ['a JSON array', '[]', NOT_OK],
+    ['a JSON null', 'null', NOT_OK],
+    ['an empty body', '', NOT_JSON],
+  ])(
+    'retries, then fails opentopodata_unavailable on %s, naming the problem',
+    async (_name, body, message) => {
+      const { client, http } = setup(() => otdResponse(body));
+      const error = await rejectionWithFakeTimers(client.lookup([SEATTLE], providerOptions()));
 
-    expect(http.calls).toHaveLength(3);
-    expect(codeOf(error)).toBe(JsonRpcErrorCode.ServiceUnavailable);
-    expect(dataOf(error)).toMatchObject({ reason: 'opentopodata_unavailable', retryable: true });
-    expect(dataOf(error)).not.toHaveProperty('status');
+      expect(http.calls).toHaveLength(3);
+      expect(codeOf(error)).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect((error as McpError).message).toBe(message);
+      expect(dataOf(error)).toStrictEqual({ reason: 'opentopodata_unavailable', retryable: true });
+    },
+  );
+
+  it('never echoes the dataset name the upstream sent', async () => {
+    const { client } = setup(() =>
+      otdResponse(
+        JSON.stringify({ results: [result({ dataset: 'srtm90m (injected)' })], status: 'OK' }),
+      ),
+    );
+    const error = await rejectionWithFakeTimers(client.lookup([SEATTLE], providerOptions()));
+    expect(JSON.stringify([(error as McpError).message, dataOf(error)])).not.toContain('injected');
   });
 
   it('recovers when a retry returns a well-formed body', async () => {
@@ -515,22 +560,45 @@ describe('OpenTopoDataClient 429', () => {
     expect(dataOf(error)).toMatchObject({
       reason: 'opentopodata_rate_limited',
       retryable: true,
-      retryAfter: '2',
+      retryAfter: 2,
     });
     expect(Date.now() - startedAt).toBeGreaterThanOrEqual(4_000);
   });
 
-  it('fails fast on a Retry-After above 8 s and carries it', async () => {
+  it('fails fast on a Retry-After above 8 s and carries it in seconds, as a number', async () => {
     const { client, http } = setup(() => otdResponse(OTD_429_BODY, 429, { 'retry-after': '30' }));
     const error = await rejectionWithFakeTimers(client.lookup([SEATTLE], providerOptions()));
 
     expect(http.calls).toHaveLength(1);
     expect(codeOf(error)).toBe(JsonRpcErrorCode.RateLimited);
-    expect(dataOf(error)).toMatchObject({
+    expect(dataOf(error)).toStrictEqual({
       reason: 'opentopodata_rate_limited',
       retryable: true,
-      retryAfter: '30',
+      retryAfter: 30,
     });
+  });
+
+  it('converts an HTTP-date Retry-After to the seconds left until it', async () => {
+    const { client, http } = setup(() =>
+      otdResponse(OTD_429_BODY, 429, {
+        'retry-after': new Date(Date.now() + 60_000).toUTCString(),
+      }),
+    );
+    const error = await rejectionWithFakeTimers(client.lookup([SEATTLE], providerOptions()));
+
+    expect(http.calls).toHaveLength(1);
+    const { retryAfter } = dataOf(error);
+    expect(retryAfter).toBeTypeOf('number');
+    expect(retryAfter as number).toBeGreaterThanOrEqual(59);
+    expect(retryAfter as number).toBeLessThanOrEqual(60);
+  });
+
+  it('omits an unparseable Retry-After rather than passing the header text on', async () => {
+    const { client, http } = setup(() => otdResponse(OTD_429_BODY, 429, { 'retry-after': 'soon' }));
+    const error = await rejectionWithFakeTimers(client.lookup([SEATTLE], providerOptions()));
+
+    expect(http.calls).toHaveLength(3);
+    expect(dataOf(error)).toStrictEqual({ reason: 'opentopodata_rate_limited', retryable: true });
   });
 
   it('recovers after a 429 once the Retry-After has passed', async () => {
@@ -625,8 +693,7 @@ describe('OpenTopoDataClient 5xx and other statuses', () => {
     const { client, http } = setup(() => Promise.reject(new TypeError('fetch failed')));
     const error = await rejectionWithFakeTimers(client.lookup([SEATTLE], providerOptions()));
     expect(http.calls).toHaveLength(3);
-    expect(dataOf(error)).toMatchObject({ reason: 'opentopodata_unavailable', retryable: true });
-    expect(dataOf(error)).not.toHaveProperty('status');
+    expect(dataOf(error)).toStrictEqual({ reason: 'opentopodata_unavailable', retryable: true });
     expect((error as McpError).message).toBe('Open Topo Data did not answer.');
   });
 

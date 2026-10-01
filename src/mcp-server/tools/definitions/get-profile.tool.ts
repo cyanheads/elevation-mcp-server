@@ -223,7 +223,7 @@ export const getProfileTool = tool('elevation_get_profile', {
       code: JsonRpcErrorCode.RateLimited,
       when: 'Open Topo Data kept answering HTTP 429 through the retries, or asked for a wait over 8 s.',
       recovery:
-        "Open Topo Data is refusing requests from this server's network address; its public instance allows 1 request per second and 1,000 per day per address, shared with any other client there. Retry elevation_get_profile in a few minutes, or re-call it with source usgs_3dep for routes inside USGS 3DEP coverage.",
+        "Open Topo Data kept refusing this server's requests as rate limited. The public instance allows 1 request per second and 1,000 per day per network address, shared with any other client at that address; a self-hosted instance sets its own limits. Retry elevation_get_profile in a few minutes, or re-call it with source usgs_3dep for routes inside USGS 3DEP coverage.",
       retryable: true,
       severity: 'warning',
       thrownBy: 'service',
@@ -231,7 +231,7 @@ export const getProfileTool = tool('elevation_get_profile', {
     {
       reason: 'opentopodata_daily_limit',
       code: JsonRpcErrorCode.RateLimited,
-      when: 'This server has sent 1,000 requests to the public Open Topo Data instance in the trailing 24 hours, so no request was sent.',
+      when: 'Only on the public Open Topo Data instance: this server has sent it 1,000 requests in the trailing 24 hours, so no request was sent.',
       recovery:
         "This server has used the public Open Topo Data instance's 1,000 requests for the past 24 hours; capacity returns as those requests age out (see retryAfter). Re-call elevation_get_profile with source usgs_3dep for routes inside USGS 3DEP coverage, or ask the server operator to set OPENTOPODATA_BASE_URL to a self-hosted Open Topo Data instance.",
       retryable: false,
@@ -252,7 +252,7 @@ export const getProfileTool = tool('elevation_get_profile', {
       code: JsonRpcErrorCode.Timeout,
       when: "The call's 45 s sampling budget ran out (a retry deadline, or a wait in either provider's request queue).",
       recovery:
-        'Re-call elevation_get_profile with fewer samples (each USGS 3DEP sample is its own upstream request), or split the route into shorter sections.',
+        'If the budget ran out waiting on USGS 3DEP, re-call elevation_get_profile with fewer samples or a shorter route, since each 3DEP sample is its own upstream request; if it ran out waiting on Open Topo Data, retry in a minute, or re-call it with source usgs_3dep for a route inside USGS 3DEP coverage.',
       thrownBy: 'service',
     },
   ],
