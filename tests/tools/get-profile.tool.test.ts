@@ -13,7 +13,9 @@ import { getProfileTool } from '@/mcp-server/tools/definitions/get-profile.tool.
 import { allToolDefinitions } from '@/mcp-server/tools/definitions/index.js';
 import { MAPZEN_ATTRIBUTION, NO_DATASET_ATTRIBUTION } from '@/services/elevation/attribution.js';
 import { disposeElevationServices } from '@/services/elevation/elevation-sampler.js';
-import { epqsHitBody, epqsResponse } from '../fixtures/epqs.js';
+import type { LatLon } from '@/services/elevation/types.js';
+import { METERS_PER_DEGREE } from '@/services/elevation/units.js';
+import { EPQS_RESOLUTION_ONE_ARCSEC, epqsHitBody, epqsResponse } from '../fixtures/epqs.js';
 import { epqsByPoint, otdByPoint } from '../fixtures/harness.js';
 import type { OtdAnswer } from '../fixtures/opentopodata.js';
 import {
@@ -776,6 +778,39 @@ describe('notices', () => {
       { lat: 47, lon: 10 },
       { lat: 47 + degrees, lon: 10 },
     ];
+    /** The point `meters` north of `start` along its meridian (south when negative). */
+    const alongMeridian = (start: LatLon, meters: number) => ({
+      lat: start.lat + meters / METERS_PER_DEGREE,
+      lon: start.lon,
+    });
+    /** A meridian route from `start` whose `samples` fall `interval` meters apart. */
+    const spacedRoute = (
+      interval: number,
+      samples: number,
+      start: LatLon = { lat: 47, lon: 10 },
+    ) => [start, alongMeridian(start, interval * (samples - 1))];
+    /**
+     * A usgs_3dep profile over a route in 3DEP territory whose samples fall
+     * `interval` m apart. EPQS answers the southern half of the route at the
+     * `southern` resolution and the rest at `northern`, each in the raster's
+     * native unit (meters, or degrees for an arc-second raster).
+     */
+    const runSplitResolution = (
+      interval: number,
+      samples: number,
+      southern: number,
+      northern: number,
+    ) => {
+      const middle = alongMeridian(START, (interval * (samples - 1)) / 2).lat;
+      useUpstreams({
+        epqs: epqsByPoint((point) =>
+          epqsResponse(
+            epqsHitBody({ value: '40', resolution: point.lat < middle ? southern : northern }),
+          ),
+        ),
+      });
+      return run({ path: spacedRoute(interval, samples, START), samples, source: 'usgs_3dep' });
+    };
 
     it('says samples are closer than the source resolution when the interval is under it', async () => {
       useUpstreams({ otd: otdByPoint(() => srtm(100)) });
@@ -798,8 +833,21 @@ describe('notices', () => {
     it('does not suggest raising samples when already at the 250 cap', async () => {
       useUpstreams({ otd: otdByPoint(() => srtm(100)) });
       const result = await run({ path: longRoute(3), samples: 250 });
-      expect(structured(result).sample_interval_m).toBeGreaterThan(20 * 30.9);
-      expect(structured(result)).not.toHaveProperty('notice');
+      const expected =
+        'Samples are 1339.7 m apart against a 30.9 m source even at the 250-sample cap; split the route into shorter calls and sum their ascent and descent to capture more relief.';
+      expect(structured(result).sample_interval_m).toBe(1339.7);
+      expect(structured(result).notice).toBe(expected);
+      expect(contentText(result)).toContain(`> ${expected}`);
+    });
+
+    it('keeps the raise-samples wording one sample under the cap', async () => {
+      useUpstreams({ otd: otdByPoint(() => srtm(100)) });
+      const result = await run({ path: longRoute(3), samples: 249 });
+      const expected =
+        'Samples are 1345.1 m apart against a 30.9 m source; raise samples (up to 250) or split the route to capture more relief.';
+      expect(structured(result).sample_interval_m).toBe(1345.1);
+      expect(structured(result).notice).toBe(expected);
+      expect(contentText(result)).toContain(`> ${expected}`);
     });
 
     it('stays quiet when the interval is within 20 times the source resolution', async () => {
@@ -835,6 +883,107 @@ describe('notices', () => {
       useUpstreams({ otd: otdByPoint(() => mapzen(100)) });
       const result = await run({ path: longRoute(3), samples: 100 });
       expect(structured(result)).not.toHaveProperty('notice');
+    });
+
+    describe('at the 250-sample cap', () => {
+      it.each([
+        [618, undefined],
+        [
+          618.1,
+          'Samples are 618.1 m apart against a 30.9 m source even at the 250-sample cap; split the route into shorter calls and sum their ascent and descent to capture more relief.',
+        ],
+      ])('applies the 20-times threshold at an interval of %s m', async (interval, expected) => {
+        useUpstreams({ otd: otdByPoint(() => srtm(100)) });
+        const result = await run({ path: spacedRoute(interval, 250), samples: 250 });
+        expect(structured(result).sample_interval_m).toBe(interval);
+        expect(structured(result).notice).toBe(expected);
+      });
+
+      it('is silent about spacing when no sample reports a resolution (all Mapzen)', async () => {
+        useUpstreams({ otd: otdByPoint(() => mapzen(100)) });
+        const result = await run({ path: longRoute(3), samples: 250 });
+        expect(structured(result)).not.toHaveProperty('resolution_m_range');
+        expect(structured(result)).not.toHaveProperty('notice');
+      });
+
+      describe('on a route whose first sample alone is 1 m 3DEP data', () => {
+        const EDGE = { lat: 5, lon: -100 };
+        const coverageEdge =
+          'The route crosses the USGS 3DEP coverage edge (1 sample from USGS 3DEP, 249 from Open Topo Data), so ascent and descent mix 1–30 m lidar-derived values with 30 m SRTM-class values; re-call elevation_get_profile with source opentopodata for a profile from one provider.';
+
+        it.each([
+          [25, coverageEdge],
+          [30, coverageEdge],
+          [
+            31,
+            `${coverageEdge} Samples are 31 m apart against a 1 m source even at the 250-sample cap; split the route into shorter calls and sum their ascent and descent to capture more relief.`,
+          ],
+        ])('keys spacing on the 1 m source at an interval of %s m', async (interval, expected) => {
+          useUpstreams({
+            epqs: epqsAnswers({ [at(EDGE.lat, EDGE.lon)]: { value: 50, resolution: 1 } }),
+            otd: otdByPoint(() => srtm(52)),
+          });
+          const path = [EDGE, alongMeridian(EDGE, -interval * 249)];
+          const result = await run({ path, samples: 250 });
+          expect(structured(result).sample_interval_m).toBe(interval);
+          expect(structured(result).resolution_m_range).toEqual({ min_m: 1, max_m: 30.9 });
+          expect(structured(result).notice).toBe(expected);
+          expect(contentText(result)).toContain(`> ${expected}`);
+        });
+      });
+    });
+
+    describe('on a single-resolution route', () => {
+      it.each([
+        [
+          9.9,
+          'Samples are 9.9 m apart, closer than the 10 m source resolution, so extra samples add no detail; re-call elevation_get_profile with fewer samples for a faster result.',
+        ],
+        [10, undefined],
+        [10.1, undefined],
+      ])(
+        'says samples are closer than the resolution only under it (%s m)',
+        async (interval, expected) => {
+          const result = await runSplitResolution(interval, 3, 10, 10);
+          expect(structured(result).resolution_m_range).toEqual({ min_m: 10, max_m: 10 });
+          expect(structured(result).sample_interval_m).toBe(interval);
+          expect(structured(result).notice).toBe(expected);
+        },
+      );
+    });
+
+    describe('on a route mixing source resolutions', () => {
+      it.each([
+        [
+          2.9,
+          'Samples are 2.9 m apart, closer than the 3 m source resolution, so extra samples add no detail; re-call elevation_get_profile with fewer samples for a faster result.',
+        ],
+        [3, undefined],
+        [3.1, undefined],
+        [9.9, undefined],
+        [10, undefined],
+        [10.1, undefined],
+      ])(
+        'says samples are closer than the resolution only under the finest one (%s m)',
+        async (interval, expected) => {
+          const result = await runSplitResolution(interval, 3, 3, 10);
+          expect(structured(result).resolution_m_range).toEqual({ min_m: 3, max_m: 10 });
+          expect(structured(result).sample_interval_m).toBe(interval);
+          expect(structured(result).notice).toBe(expected);
+        },
+      );
+
+      it.each([30.1, 30.5, 30.8])(
+        'gives only the coarse-spacing advice between 30 m and a 30.9 m source over 1 m lidar (%s m)',
+        async (interval) => {
+          const result = await runSplitResolution(interval, 5, 1, EPQS_RESOLUTION_ONE_ARCSEC);
+          const expected = `Samples are ${interval} m apart against a 1 m source; raise samples (up to 250) or split the route to capture more relief.`;
+          expect(structured(result).resolution_m_range).toEqual({ min_m: 1, max_m: 30.9 });
+          expect(structured(result).sample_interval_m).toBe(interval);
+          expect(structured(result).notice).toBe(expected);
+          expect(contentText(result)).toContain(`> ${expected}`);
+        },
+      );
     });
   });
 

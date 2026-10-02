@@ -435,14 +435,17 @@ function buildNotice(
   }
   const range = result.resolution_m_range;
   const interval = result.sample_interval_m;
-  if (range && interval < range.max_m) {
+  if (range && interval < range.min_m) {
     fragments.push(
-      `Samples are ${interval} m apart, closer than the ${range.max_m} m source resolution, so extra samples add no detail; re-call elevation_get_profile with fewer samples for a faster result.`,
+      `Samples are ${interval} m apart, closer than the ${range.min_m} m source resolution, so extra samples add no detail; re-call elevation_get_profile with fewer samples for a faster result.`,
     );
   }
-  if (range && requestedSamples < MAX_SAMPLES && interval > 20 * range.min_m && interval > 30) {
+  if (range && interval > 20 * range.min_m && interval > 30) {
+    const spacing = `Samples are ${interval} m apart against a ${range.min_m} m source`;
     fragments.push(
-      `Samples are ${interval} m apart against a ${range.min_m} m source; raise samples (up to ${MAX_SAMPLES}) or split the route to capture more relief.`,
+      requestedSamples < MAX_SAMPLES
+        ? `${spacing}; raise samples (up to ${MAX_SAMPLES}) or split the route to capture more relief.`
+        : `${spacing} even at the ${MAX_SAMPLES}-sample cap; split the route into shorter calls and sum their ascent and descent to capture more relief.`,
     );
   }
   return fragments.length > 0 ? fragments.join(' ') : undefined;
