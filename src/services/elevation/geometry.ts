@@ -1,13 +1,13 @@
 /**
  * @fileoverview Pure terrain geometry for the computed tools: great-circle
  * distance and interpolation, path resampling, profile statistics, grid
- * nodes, and terrain line of sight with earth curvature and refraction.
- * No I/O; every function is deterministic.
+ * nodes, terrain line of sight with earth curvature and refraction, and first
+ * Fresnel zone clearance. No I/O; every function is deterministic.
  * @module services/elevation/geometry
  */
 
 import type { Dataset, LatLon } from './types.js';
-import { EARTH_RADIUS_M, METERS_PER_DEGREE, roundTo } from './units.js';
+import { EARTH_RADIUS_M, METERS_PER_DEGREE, roundTo, SPEED_OF_LIGHT_M_PER_US } from './units.js';
 
 const toRadians = (degrees: number) => (degrees * Math.PI) / 180;
 const toDegrees = (radians: number) => (radians * 180) / Math.PI;
@@ -279,6 +279,9 @@ export const EARTH_MODELS = [
   'radio',
 ] as const satisfies readonly EarthModel[];
 
+/** Every first Fresnel zone verdict, in the order the output advertises them; none reads as the geometric verdict's clear or blocked. */
+export const FRESNEL_VERDICTS = ['sufficient', 'insufficient', 'indeterminate'] as const;
+
 /** Refraction coefficient κ per curved model: none, standard visible light, standard 4/3-earth radio. */
 export const REFRACTION_COEFFICIENTS: Readonly<Record<Exclude<EarthModel, 'flat'>, number>> = {
   geometric: 0,
@@ -318,11 +321,17 @@ export function curvatureBulge(distance_m: number, total_m: number, model: Earth
 }
 
 /**
- * The surface a sightline must clear: 0 m over a Mapzen value below 0 m
- * (open water, where Mapzen reports the sea floor), otherwise the terrain
- * elevation as received.
+ * The surface a sightline must clear. With a caller-set `water_surface_m`,
+ * the higher of the elevation and that level, whatever the dataset. Without
+ * one, 0 m over a Mapzen value below 0 m (open water, where Mapzen reports the
+ * sea floor), otherwise the elevation as received.
  */
-export function surfaceElevation(elevation_m: number, dataset: Dataset | undefined): number {
+export function surfaceElevation(
+  elevation_m: number,
+  dataset: Dataset | undefined,
+  water_surface_m?: number,
+): number {
+  if (water_surface_m !== undefined) return Math.max(elevation_m, water_surface_m);
   return dataset === 'mapzen' && elevation_m < 0 ? 0 : elevation_m;
 }
 
@@ -373,6 +382,8 @@ export interface LineOfSightInput {
   /** At least 3 samples, endpoints included. */
   samples: readonly SightlineSample[];
   target_height_m: number;
+  /** Water level every sample's surface is raised to, in place of the Mapzen 0 m rule ({@link surfaceElevation}). */
+  water_surface_m?: number | undefined;
 }
 
 /** Terrain line-of-sight verdict and its supporting measurements. */
@@ -390,9 +401,14 @@ export type LineOfSightResult =
       missing_interior: number;
       obstructed_samples: number;
       observer: SightlineEndpoint;
-      /** Samples (endpoints included) where the sea-surface rule replaced a Mapzen sea-floor value. */
+      /**
+       * Samples (endpoints included) whose surface was raised above the value
+       * received: to 0 m over a Mapzen sea floor, or to `water_surface_m` when set.
+       */
       sea_surface_samples: number;
       target: SightlineEndpoint;
+      /** USGS 3DEP samples (endpoints included) with a value below 0 m. */
+      usgs_below_zero_samples: number;
       verdict: 'blocked' | 'clear' | 'indeterminate';
     };
 
@@ -401,13 +417,13 @@ export type LineOfSightResult =
  * (sample 0, raised `observer_height_m` above its surface) to the target (the
  * last sample, raised `target_height_m`). Interior sample i with data has
  * clearance z_i − (s_i + b_i), where z_i interpolates the sightline linearly
- * in distance, s_i is {@link surfaceElevation}, and b_i is
- * {@link curvatureBulge}. Verdict: `blocked` when any interior clearance is
- * ≤ 0; `clear` when every interior sample has data and clears; otherwise
- * `indeterminate`.
+ * in distance, s_i is {@link surfaceElevation} (with `water_surface_m` when
+ * set), and b_i is {@link curvatureBulge}. Verdict: `blocked` when any
+ * interior clearance is ≤ 0; `clear` when every interior sample has data and
+ * clears; otherwise `indeterminate`.
  */
 export function lineOfSight(input: LineOfSightInput): LineOfSightResult {
-  const { samples, distance_m: total } = input;
+  const { samples, distance_m: total, water_surface_m } = input;
   const observerSample = samples[0];
   const targetSample = samples.at(-1);
   if (observerSample?.elevation_m === undefined || targetSample?.elevation_m === undefined) {
@@ -418,9 +434,10 @@ export function lineOfSight(input: LineOfSightInput): LineOfSightResult {
     };
   }
 
-  const observer = toEndpoint(observerSample, input.observer_height_m);
-  const target = toEndpoint(targetSample, input.target_height_m);
+  const observer = toEndpoint(observerSample, input.observer_height_m, water_surface_m);
+  const target = toEndpoint(targetSample, input.target_height_m, water_surface_m);
   let seaSurfaceSamples = 0;
+  let usgsBelowZeroSamples = 0;
   let missingInterior = 0;
   const clearances: ClearancePoint[] = [];
 
@@ -429,8 +446,9 @@ export function lineOfSight(input: LineOfSightInput): LineOfSightResult {
       if (index > 0 && index < samples.length - 1) missingInterior++;
       return;
     }
-    const surface = surfaceElevation(sample.elevation_m, sample.dataset);
+    const surface = surfaceElevation(sample.elevation_m, sample.dataset, water_surface_m);
     if (surface !== sample.elevation_m) seaSurfaceSamples++;
+    if (sample.dataset === 'usgs_3dep' && sample.elevation_m < 0) usgsBelowZeroSamples++;
     if (index === 0 || index === samples.length - 1) return;
     const bulge = curvatureBulge(sample.distance_m, total, input.earth_model);
     const sightline =
@@ -467,8 +485,83 @@ export function lineOfSight(input: LineOfSightInput): LineOfSightResult {
     observer,
     sea_surface_samples: seaSurfaceSamples,
     target,
+    usgs_below_zero_samples: usgsBelowZeroSamples,
     verdict,
   };
+}
+
+/**
+ * Share of the first Fresnel zone radius a link must clear for free-space
+ * propagation (ITU-R P.530-19 §2.2.2; P.526-16 §2.3 starts the diffraction
+ * zone there).
+ */
+export const FRESNEL_CLEARANCE_FRACTION = 0.6;
+
+/**
+ * First Fresnel zone radius in meters at `distance_m` along a link `total_m`
+ * long: √(λ·d₁·d₂/D) with λ = c/f (ITU-R P.526-16 §2.1, n = 1). 0 at either end.
+ */
+export function firstFresnelRadius(
+  distance_m: number,
+  total_m: number,
+  frequency_mhz: number,
+): number {
+  const wavelength_m = SPEED_OF_LIGHT_M_PER_US / frequency_mhz;
+  return Math.sqrt((wavelength_m * distance_m * (total_m - distance_m)) / total_m);
+}
+
+/** An interior sample measured against the first Fresnel zone (unrounded). */
+export interface FresnelPoint extends ClearancePoint {
+  /** `clearance_m / fresnel_radius_m`; negative where terrain blocks the line. */
+  clearance_ratio: number;
+  fresnel_radius_m: number;
+}
+
+/** First Fresnel zone inputs: a line of sight's interior clearances and its length. */
+export interface FresnelInput {
+  /** Every interior sample with data, as {@link lineOfSight} returns them. */
+  clearances: readonly ClearancePoint[];
+  /** Line length D, meters. */
+  distance_m: number;
+  frequency_mhz: number;
+  /** Interior samples without data. */
+  missing_interior: number;
+}
+
+/** First Fresnel zone verdict and the sample that limits it. */
+export interface FresnelClearance {
+  /** Interior sample with the smallest ratio (first on ties); absent when no interior sample has data. */
+  limiting?: FresnelPoint;
+  verdict: (typeof FRESNEL_VERDICTS)[number];
+}
+
+/**
+ * Measures each interior clearance against the first Fresnel zone radius at
+ * its position. Verdict: `insufficient` when any sample with data clears less
+ * than {@link FRESNEL_CLEARANCE_FRACTION} of its radius (a terrain obstruction
+ * always does); `sufficient` when every interior sample has data and clears at
+ * least that; otherwise `indeterminate`.
+ */
+export function fresnelClearance(input: FresnelInput): FresnelClearance {
+  let limiting: FresnelPoint | undefined;
+  for (const point of input.clearances) {
+    const fresnel_radius_m = firstFresnelRadius(
+      point.distance_m,
+      input.distance_m,
+      input.frequency_mhz,
+    );
+    const clearance_ratio = point.clearance_m / fresnel_radius_m;
+    if (limiting === undefined || clearance_ratio < limiting.clearance_ratio) {
+      limiting = { ...point, clearance_ratio, fresnel_radius_m };
+    }
+  }
+  const verdict =
+    limiting !== undefined && limiting.clearance_ratio < FRESNEL_CLEARANCE_FRACTION
+      ? 'insufficient'
+      : limiting === undefined || input.missing_interior > 0
+        ? 'indeterminate'
+        : 'sufficient';
+  return { ...(limiting && { limiting }), verdict };
 }
 
 function location(sample: KnownSample): SampleLocation {
@@ -480,8 +573,12 @@ function location(sample: KnownSample): SampleLocation {
   };
 }
 
-function toEndpoint(sample: KnownSample, height_m: number): SightlineEndpoint {
-  const surface = surfaceElevation(sample.elevation_m, sample.dataset);
+function toEndpoint(
+  sample: KnownSample,
+  height_m: number,
+  water_surface_m: number | undefined,
+): SightlineEndpoint {
+  const surface = surfaceElevation(sample.elevation_m, sample.dataset, water_surface_m);
   return {
     ...location(sample),
     ground_elevation_m: sample.elevation_m,

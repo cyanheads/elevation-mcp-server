@@ -21,6 +21,10 @@ import {
   type ClearancePoint,
   EARTH_MODELS,
   effectiveEarthRadius,
+  FRESNEL_CLEARANCE_FRACTION,
+  FRESNEL_VERDICTS,
+  type FresnelClearance,
+  fresnelClearance,
   lineOfSight,
   MAX_SIGHTLINE_LENGTH_M,
   refractionCoefficient,
@@ -29,7 +33,7 @@ import {
   type SightlineSample,
 } from '@/services/elevation/geometry.js';
 import { DATASETS, type Sample, SOURCE_MODES } from '@/services/elevation/types.js';
-import { metersToFeet, roundTo } from '@/services/elevation/units.js';
+import { METERS_PER_FOOT, roundTo } from '@/services/elevation/units.js';
 
 /** Clearance under which a `clear` verdict carries a margin notice, meters. */
 const THIN_MARGIN_M = 2;
@@ -71,7 +75,7 @@ type TerrainPoint = z.infer<typeof TerrainPointSchema>;
 export const checkLineOfSightTool = tool('elevation_check_line_of_sight', {
   title: 'Check Terrain Line of Sight',
   description:
-    'Check whether terrain blocks the straight sightline between an observer and a target, each at a height above the ground, accounting for earth curvature and atmospheric refraction. Returns a verdict of clear, blocked, or indeterminate (when samples along the line have no data), the minimum clearance and the terrain point that limits it, and the first obstruction from the observer when blocked. Over open water, clearance is measured to the sea surface. Models terrain only: buildings and vegetation are not modeled beyond what the elevation source itself captures, and a ridge narrower than the reported sample spacing can be missed. To see the terrain between the points, call elevation_get_profile on the same two points.',
+    'Check whether terrain blocks the straight sightline between an observer and a target, each at a height above the ground, accounting for earth curvature and atmospheric refraction. Returns a verdict of clear, blocked, or indeterminate (when samples along the line have no data), the minimum clearance and the terrain point that limits it, and the first obstruction from the observer when blocked. With frequency_mhz, it also reports first Fresnel zone clearance against the 60% free-space bar. Where Mapzen reports sea-floor depth over open water, clearance is measured to the sea surface; USGS 3DEP values below 0 m (bay floor in some bays, or dry land) count as received unless water_surface_m sets a water level. Models terrain only: buildings and vegetation are not modeled beyond what the elevation source itself captures, and a ridge narrower than the reported sample spacing can be missed. To see the terrain between the points, call elevation_get_profile on the same two points.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   auth: ['tool:elevation_check_line_of_sight:read'],
   input: z.object({
@@ -91,6 +95,12 @@ export const checkLineOfSightTool = tool('elevation_check_line_of_sight', {
     samples: blankAsUnset(z.number().int().min(3).max(250).default(100)).describe(
       'Evenly spaced terrain samples along the line, endpoints included (3–250, default 100). Spacing is reported; a ridge narrower than it can be missed.',
     ),
+    water_surface_m: blankAsUnset(z.number().min(-500).max(9_000).optional()).describe(
+      "Water level in meters (-500 to 9,000). When set, each sample's surface, endpoints included, is the higher of its elevation and this level, replacing the default that lifts only Mapzen sea-floor values to 0 m. Set it where the line crosses water: 0 where USGS 3DEP reports a bay floor, or a lake or tide level.",
+    ),
+    frequency_mhz: blankAsUnset(z.number().min(30).max(300_000).optional()).describe(
+      'Radio frequency in MHz (30–300,000; 5800 for 5.8 GHz). When set, the result adds first Fresnel zone clearance against the 60% free-space bar; pair it with earth_model radio.',
+    ),
     source: SourceSchema,
   }),
   output: z.object({
@@ -101,7 +111,7 @@ export const checkLineOfSightTool = tool('elevation_check_line_of_sight', {
       ),
     distance_m: z.number().describe('Great-circle distance from observer to target, meters.'),
     observer: EndpointSchema.describe(
-      "The observer's end of the sightline, in decimal degrees and meters. Ground elevation is as the dataset reports it; surface is the ground, or 0 where a Mapzen value below 0 marks open water; sightline = surface + height. resolution_m is absent for mapzen.",
+      "The observer's end of the sightline, in decimal degrees and meters. Ground elevation is as the dataset reports it; surface is the higher of the ground and water_surface_m when set, otherwise the ground, or 0 where a Mapzen value below 0 marks open water; sightline = surface + height. resolution_m is absent for mapzen.",
     ),
     target: EndpointSchema.describe("The target's end of the sightline; fields as on observer."),
     min_clearance_m: z
@@ -115,7 +125,7 @@ export const checkLineOfSightTool = tool('elevation_check_line_of_sight', {
       .optional()
       .describe('Smallest clearance in international feet. Absent with min_clearance_m.'),
     limiting_point: TerrainPointSchema.optional().describe(
-      'The sample between the endpoints with the smallest clearance (first on ties); absent when none of them has data. In decimal degrees and meters. Terrain is as the dataset reports it; surface is the terrain, or 0 where a Mapzen value below 0 marks open water; bulge is the rise of the curved surface above the straight observer-target chord (0 for flat); clearance = sightline − (surface + bulge), and 0 or below means blocked. resolution_m is absent for mapzen.',
+      'The sample between the endpoints with the smallest clearance (first on ties); absent when none of them has data. Units, surface, and resolution_m as on observer, with terrain in place of its ground; bulge is the rise of the curved surface above the straight observer-target chord (0 for flat); clearance = sightline − (surface + bulge), and 0 or below means blocked.',
     ),
     first_obstruction: TerrainPointSchema.optional().describe(
       'The obstructing sample nearest the observer; present only when the verdict is blocked. Fields as on limiting_point.',
@@ -124,6 +134,32 @@ export const checkLineOfSightTool = tool('elevation_check_line_of_sight', {
       .number()
       .int()
       .describe('Samples between the endpoints with clearance 0 or below.'),
+    fresnel: z
+      .object({
+        frequency_mhz: z.number().describe('Frequency evaluated.'),
+        verdict: z
+          .enum(FRESNEL_VERDICTS)
+          .describe(
+            'sufficient when every sample between the endpoints has data and clears at least 0.6 of the zone radius; insufficient when any sample with data clears less, terrain blocking the line included; indeterminate when samples without data leave it unconfirmed.',
+          ),
+        min_clearance_ratio: z
+          .number()
+          .optional()
+          .describe(
+            'Smallest clearance_m / zone radius over samples between the endpoints. Absent when none of them has data.',
+          ),
+        limiting_point: TerrainPointSchema.extend({
+          fresnel_radius_m: z.number().describe('Zone radius.'),
+        })
+          .optional()
+          .describe(
+            'The sample with the smallest ratio (first on ties), often not limiting_point; absent with min_clearance_ratio. Fields as on limiting_point, plus the zone radius there.',
+          ),
+      })
+      .optional()
+      .describe(
+        'First Fresnel zone clearance; present only when frequency_mhz is set. Zone radius = √(λ·d₁·d₂/D) m, with λ = 299.792458 / frequency_mhz, d₁ and d₂ the distances to each end, and D the line length.',
+      ),
     earth_model: z.enum(EARTH_MODELS).describe('The earth model applied.'),
     refraction_coefficient: z
       .number()
@@ -149,7 +185,7 @@ export const checkLineOfSightTool = tool('elevation_check_line_of_sight', {
       .string()
       .optional()
       .describe(
-        'Guidance on unconfirmed sightlines, thin clearance margins, lines crossing the USGS 3DEP coverage edge, and samples over open water.',
+        'Guidance on unconfirmed sightlines, thin clearance margins, a clear line short of 60% first Fresnel zone clearance, lines crossing the USGS 3DEP coverage edge, samples over open water or below water_surface_m, and USGS 3DEP values below 0 m.',
       ),
     attribution: z
       .string()
@@ -261,6 +297,7 @@ export const checkLineOfSightTool = tool('elevation_check_line_of_sight', {
       earth_model: input.earth_model,
       observer_height_m: input.observer_height_m,
       target_height_m: input.target_height_m,
+      water_surface_m: input.water_surface_m,
       samples: sampled.map((sample, index) =>
         toSightlineSample(sample, line.samples[index]?.distance_m ?? 0),
       ),
@@ -282,18 +319,36 @@ export const checkLineOfSightTool = tool('elevation_check_line_of_sight', {
     const samplesWithData = sampled.filter((sample) => sample.elevation_m !== undefined).length;
     const kappa = refractionCoefficient(input.earth_model);
     const radius = effectiveEarthRadius(input.earth_model);
+    const fresnel =
+      input.frequency_mhz === undefined
+        ? undefined
+        : toFresnelResult(
+            fresnelClearance({
+              clearances: los.clearances,
+              distance_m: line.total_distance_m,
+              frequency_mhz: input.frequency_mhz,
+              missing_interior: los.missing_interior,
+            }),
+            input.frequency_mhz,
+          );
     const result = {
       verdict: los.verdict,
       distance_m: roundTo(line.total_distance_m, 1),
       observer: toEndpointResult(los.observer, input.observer_height_m),
       target: toEndpointResult(los.target, input.target_height_m),
       ...(los.limiting && {
-        min_clearance_m: roundTo(los.limiting.clearance_m, 2),
-        min_clearance_ft: metersToFeet(los.limiting.clearance_m),
+        min_clearance_m: roundKeepingSide(los.limiting.clearance_m, 2, 0, 'above'),
+        min_clearance_ft: roundKeepingSide(
+          los.limiting.clearance_m / METERS_PER_FOOT,
+          1,
+          0,
+          'above',
+        ),
         limiting_point: toTerrainPoint(los.limiting),
       }),
       ...(los.first_obstruction && { first_obstruction: toTerrainPoint(los.first_obstruction) }),
       obstructed_samples: los.obstructed_samples,
+      ...(fresnel && { fresnel }),
       earth_model: input.earth_model,
       ...(kappa !== undefined && { refraction_coefficient: kappa }),
       ...(radius !== undefined && { effective_earth_radius_m: roundTo(radius, 1) }),
@@ -320,15 +375,30 @@ export const checkLineOfSightTool = tool('elevation_check_line_of_sight', {
         `Minimum clearance is under ${THIN_MARGIN_M} m at ${roundTo(los.limiting.distance_m, 1)} m from the observer; DEM vertical error, vegetation, and structures can close a margin that small.`,
       );
     }
+    if (los.verdict === 'clear' && fresnel?.verdict === 'insufficient' && fresnel.limiting_point) {
+      fragments.push(
+        `The sightline clears the terrain but not 60% of the first Fresnel zone at ${fresnel.frequency_mhz} MHz: at ${fresnel.limiting_point.distance_from_observer_m} m from the observer it clears ${fresnel.min_clearance_ratio} of the zone's ${fresnel.limiting_point.fresnel_radius_m} m radius, so expect diffraction loss.`,
+      );
+    }
     const { usgs, openTopoData } = providerSplit(result.datasets_used);
     if (usgs > 0 && openTopoData > 0) {
       fragments.push(
         `The line crosses the USGS 3DEP coverage edge (${countOf(usgs, 'sample')} from USGS 3DEP, ${openTopoData} from Open Topo Data); clearances compare terrain of different resolution and surface model.`,
       );
     }
-    if (los.sea_surface_samples > 0) {
+    const raised = los.sea_surface_samples;
+    if (raised > 0) {
+      const samplesLie = `${countOf(raised, 'sample')} ${agree(raised, 'lies', 'lie')}`;
       fragments.push(
-        `${countOf(los.sea_surface_samples, 'sample')} ${agree(los.sea_surface_samples, 'lies', 'lie')} over open water, where Mapzen reports sea-floor depth, so clearance there is measured to the sea surface at 0 m.`,
+        input.water_surface_m === undefined
+          ? `${samplesLie} over open water, where Mapzen reports sea-floor depth, so clearance there is measured to the sea surface at 0 m.`
+          : `${samplesLie} below the ${input.water_surface_m} m water surface set by water_surface_m, so clearance there is measured to it.`,
+      );
+    }
+    const belowZero = los.usgs_below_zero_samples;
+    if (input.water_surface_m === undefined && belowZero > 0) {
+      fragments.push(
+        `${countOf(belowZero, 'USGS 3DEP sample')} ${agree(belowZero, 'lies', 'lie')} below 0 m and ${agree(belowZero, 'is', 'are')} measured as received: bay-floor bathymetry where 3DEP carries it, or land or water below sea level. If the line crosses water, re-call elevation_check_line_of_sight with water_surface_m set to the water level.`,
       );
     }
     if (fragments.length > 0) ctx.enrich.notice(fragments.join(' '));
@@ -339,8 +409,8 @@ export const checkLineOfSightTool = tool('elevation_check_line_of_sight', {
   format: (result) => {
     const describeEndpoint = (label: string, endpoint: z.infer<typeof EndpointSchema>) =>
       `- **${label}:** ${endpoint.lat}, ${endpoint.lon}; ground ${endpoint.ground_elevation_m} m, surface ${endpoint.surface_elevation_m} m, height ${endpoint.height_above_ground_m} m above it, sightline ${endpoint.sightline_elevation_m} m (${endpoint.dataset}, resolution ${endpoint.resolution_m === undefined ? 'varies' : `${endpoint.resolution_m} m`})`;
-    const describePoint = (label: string, point: TerrainPoint) =>
-      `- **${label}:** ${point.lat}, ${point.lon} at ${point.distance_from_observer_m} m from the observer; terrain ${point.terrain_elevation_m} m, surface ${point.surface_elevation_m} m, curvature bulge ${point.curvature_bulge_m} m, sightline ${point.sightline_elevation_m} m, clearance ${point.clearance_m} m (${point.dataset}, resolution ${point.resolution_m === undefined ? 'varies' : `${point.resolution_m} m`})`;
+    const describePoint = (label: string, point: TerrainPoint, extra = '') =>
+      `- **${label}:** ${point.lat}, ${point.lon} at ${point.distance_from_observer_m} m from the observer; terrain ${point.terrain_elevation_m} m, surface ${point.surface_elevation_m} m, curvature bulge ${point.curvature_bulge_m} m, sightline ${point.sightline_elevation_m} m, clearance ${point.clearance_m} m${extra} (${point.dataset}, resolution ${point.resolution_m === undefined ? 'varies' : `${point.resolution_m} m`})`;
 
     const lines = [
       `## Line of sight: ${result.verdict}`,
@@ -356,8 +426,27 @@ export const checkLineOfSightTool = tool('elevation_check_line_of_sight', {
     if (result.first_obstruction) {
       lines.push(describePoint('First obstruction', result.first_obstruction));
     }
+    lines.push(`- **Obstructed samples:** ${result.obstructed_samples}`);
+    const { fresnel } = result;
+    if (fresnel) {
+      lines.push(
+        `- **Fresnel zone at ${fresnel.frequency_mhz} MHz:** ${fresnel.verdict} against the 60% free-space bar; ${
+          fresnel.min_clearance_ratio === undefined
+            ? 'clearance ratio not measured (no sample between the endpoints has data)'
+            : `minimum clearance ratio ${fresnel.min_clearance_ratio}`
+        }`,
+      );
+      if (fresnel.limiting_point) {
+        lines.push(
+          describePoint(
+            'Fresnel limiting point',
+            fresnel.limiting_point,
+            `, first Fresnel zone radius ${fresnel.limiting_point.fresnel_radius_m} m`,
+          ),
+        );
+      }
+    }
     lines.push(
-      `- **Obstructed samples:** ${result.obstructed_samples}`,
       `- **Earth model:** ${result.earth_model}${
         result.refraction_coefficient === undefined
           ? ' (no curvature)'
@@ -396,6 +485,47 @@ function toEndpointResult(endpoint: SightlineEndpoint, height_m: number) {
   };
 }
 
+/**
+ * `value` rounded to `decimals` for display, except that a value strictly on
+ * `side` of a verdict's `bar` never rounds onto or past it: it shows at least
+ * one step beyond the bar on that side. `side` is the side the bar itself does
+ * not belong to: above for the 0 m clearance bar (0 is blocked), below for the
+ * Fresnel ratio bar (the bar is sufficient). Values on the bar's own side round
+ * as usual.
+ */
+function roundKeepingSide(
+  value: number,
+  decimals: number,
+  bar: number,
+  side: 'above' | 'below',
+): number {
+  const rounded = roundTo(value, decimals);
+  const step = 10 ** -decimals;
+  if (side === 'above' && value > bar) return Math.max(rounded, roundTo(bar + step, decimals));
+  if (side === 'below' && value < bar) return Math.min(rounded, roundTo(bar - step, decimals));
+  return rounded;
+}
+
+/** The output's `fresnel` object: ratio and radius to 2 decimals, the verdict from unrounded ratios. */
+function toFresnelResult(fresnel: FresnelClearance, frequency_mhz: number) {
+  return {
+    frequency_mhz,
+    verdict: fresnel.verdict,
+    ...(fresnel.limiting && {
+      min_clearance_ratio: roundKeepingSide(
+        fresnel.limiting.clearance_ratio,
+        2,
+        FRESNEL_CLEARANCE_FRACTION,
+        'below',
+      ),
+      limiting_point: {
+        ...toTerrainPoint(fresnel.limiting),
+        fresnel_radius_m: roundTo(fresnel.limiting.fresnel_radius_m, 2),
+      },
+    }),
+  };
+}
+
 function toTerrainPoint(point: ClearancePoint): TerrainPoint {
   return {
     lat: point.lat,
@@ -405,7 +535,7 @@ function toTerrainPoint(point: ClearancePoint): TerrainPoint {
     surface_elevation_m: point.surface_elevation_m,
     curvature_bulge_m: roundTo(point.curvature_bulge_m, 2),
     sightline_elevation_m: roundTo(point.sightline_elevation_m, 2),
-    clearance_m: roundTo(point.clearance_m, 2),
+    clearance_m: roundKeepingSide(point.clearance_m, 2, 0, 'above'),
     dataset: point.dataset,
     ...(point.resolution_m !== undefined && { resolution_m: point.resolution_m }),
   };

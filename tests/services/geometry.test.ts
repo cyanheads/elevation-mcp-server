@@ -2,7 +2,8 @@
  * @fileoverview Tests for the pure geometry module against the golden values
  * in docs/design.md § Computation: haversine on public reference coordinates,
  * path resampling, profile statistics with gaps bridged, grid nodes, the
- * curvature bulge, the sea-surface rule, and the three line-of-sight verdicts.
+ * curvature bulge, the sea-surface and water-surface rules, the three
+ * line-of-sight verdicts, and first Fresnel zone clearance.
  * @module tests/services/geometry.test
  */
 
@@ -13,6 +14,8 @@ import {
   EARTH_MODELS,
   type EarthModel,
   effectiveEarthRadius,
+  firstFresnelRadius,
+  fresnelClearance,
   gridNodes,
   haversineDistance,
   interpolateGreatCircle,
@@ -627,6 +630,26 @@ describe('surfaceElevation', () => {
   it('keeps a value with no dataset', () => {
     expect(surfaceElevation(-5, undefined)).toBe(-5);
   });
+
+  describe('with a water level set', () => {
+    it('takes the higher of the elevation and the level, for every dataset', () => {
+      expect(surfaceElevation(-50, 'usgs_3dep', 0), 'a 3DEP bay floor').toBe(0);
+      expect(surfaceElevation(2, 'srtm30m', 3), 'SRTM land below a lake level').toBe(3);
+      expect(surfaceElevation(-80, 'usgs_3dep', -72.47), 'below a lake under sea level').toBe(
+        -72.47,
+      );
+      expect(surfaceElevation(5, 'usgs_3dep', 0), '3DEP land above the level').toBe(5);
+      expect(surfaceElevation(3, 'srtm30m', 3), 'a value equal to the level').toBe(3);
+      expect(surfaceElevation(-84.78, 'usgs_3dep', -90), 'dry land above a lower level').toBe(
+        -84.78,
+      );
+    });
+
+    it('replaces the Mapzen 0 m rule rather than adding to it', () => {
+      expect(surfaceElevation(-50, 'mapzen', -60)).toBe(-50);
+      expect(surfaceElevation(-50, 'mapzen', -10)).toBe(-10);
+    });
+  });
 });
 
 describe('lineOfSight', () => {
@@ -813,6 +836,111 @@ describe('lineOfSight', () => {
     });
   });
 
+  describe('USGS 3DEP values below 0 m and a set water surface', () => {
+    /** The design's golden line: 50 km, 0 m 3DEP endpoints over a -50 m 3DEP midpoint, optical, observer 1.7 m. */
+    const usgsFiftyKm = (water_surface_m?: number) =>
+      lineOfSight({
+        distance_m: 50_000,
+        earth_model: 'optical',
+        observer_height_m: 1.7,
+        target_height_m: 0,
+        samples: [
+          sample(0, 0, 'usgs_3dep'),
+          sample(25_000, -50, 'usgs_3dep'),
+          sample(50_000, 0, 'usgs_3dep'),
+        ],
+        ...(water_surface_m !== undefined && { water_surface_m }),
+      });
+
+    it('unset: uses the 3DEP value as received, clear at 8.18 m, and counts it as below 0 m', () => {
+      const result = usgsFiftyKm();
+      if (result.kind !== 'evaluated') throw new Error('expected an evaluated result');
+      expect(result.verdict).toBe('clear');
+      expect(result.limiting?.clearance_m).toBeCloseTo(8.1762, 4);
+      expect(result.limiting?.surface_elevation_m).toBe(-50);
+      expect(result.sea_surface_samples).toBe(0);
+      expect(result.usgs_below_zero_samples).toBe(1);
+    });
+
+    it('water_surface_m 0: measures to the water, blocked at -41.82 m', () => {
+      const result = usgsFiftyKm(0);
+      if (result.kind !== 'evaluated') throw new Error('expected an evaluated result');
+      expect(result.verdict).toBe('blocked');
+      expect(result.limiting?.clearance_m).toBeCloseTo(-41.8238, 4);
+      expect(result.limiting?.surface_elevation_m).toBe(0);
+      expect(result.limiting?.terrain_elevation_m).toBe(-50);
+      expect(result.first_obstruction?.index).toBe(1);
+      expect(result.sea_surface_samples).toBe(1);
+    });
+
+    it('raises endpoints to the level too, counting them, and keeps their ground as received', () => {
+      const result = lineOfSight({
+        distance_m: 1_000,
+        earth_model: 'flat',
+        observer_height_m: 2,
+        target_height_m: 3,
+        water_surface_m: 0.5,
+        samples: [
+          sample(0, -2, 'usgs_3dep'),
+          sample(500, -30, 'usgs_3dep'),
+          sample(1_000, 4, 'srtm30m'),
+        ],
+      });
+      if (result.kind !== 'evaluated') throw new Error('expected an evaluated result');
+      expect(result.observer).toMatchObject({
+        ground_elevation_m: -2,
+        surface_elevation_m: 0.5,
+        sightline_elevation_m: 2.5,
+      });
+      expect(result.target).toMatchObject({
+        ground_elevation_m: 4,
+        surface_elevation_m: 4,
+        sightline_elevation_m: 7,
+      });
+      expect(result.limiting?.surface_elevation_m).toBe(0.5);
+      expect(result.sea_surface_samples).toBe(2);
+    });
+
+    it('replaces the Mapzen 0 m rule: a -60 m level leaves a -50 m Mapzen sea floor as received', () => {
+      const result = lineOfSight({
+        distance_m: 50_000,
+        earth_model: 'optical',
+        observer_height_m: 1.7,
+        target_height_m: 0,
+        water_surface_m: -60,
+        samples: [
+          sample(0, 0, 'mapzen'),
+          sample(25_000, -50, 'mapzen'),
+          sample(50_000, 0, 'mapzen'),
+        ],
+      });
+      if (result.kind !== 'evaluated') throw new Error('expected an evaluated result');
+      expect(result.verdict).toBe('clear');
+      expect(result.limiting?.surface_elevation_m).toBe(-50);
+      expect(result.sea_surface_samples).toBe(0);
+    });
+
+    it('counts 3DEP samples strictly below 0 m, endpoints included, and no other dataset', () => {
+      const result = lineOfSight({
+        distance_m: 1_000,
+        earth_model: 'flat',
+        observer_height_m: 0,
+        target_height_m: 0,
+        samples: [
+          sample(0, -1, 'usgs_3dep'),
+          sample(200, -5, 'srtm30m'),
+          sample(400, -5, 'mapzen'),
+          sample(600, 0, 'usgs_3dep'),
+          sample(800, undefined),
+          sample(1_000, -0.01, 'usgs_3dep'),
+        ],
+      });
+      if (result.kind !== 'evaluated') throw new Error('expected an evaluated result');
+      expect(result.usgs_below_zero_samples).toBe(2);
+      expect(result.sea_surface_samples).toBe(1);
+    });
+  });
+
   describe('curvature at the midpoint of a 50 km line', () => {
     const midpointOver = (model: EarthModel) => {
       const result = lineOfSight({
@@ -974,5 +1102,142 @@ describe('lineOfSight', () => {
       expect(result.missing_interior).toBe(2);
       expect(result.clearances).toHaveLength(1);
     });
+  });
+
+  describe('first Fresnel zone over the clearances', () => {
+    /** A flat 10 km line, both antennas `height` m above 0 m endpoints, interior terrain evenly spaced (undefined = no data), at 5,800 MHz. */
+    const tenKm = (height: number, interior: (number | undefined)[]) => {
+      const spacing = 10_000 / (interior.length + 1);
+      const sightline = lineOfSight({
+        distance_m: 10_000,
+        earth_model: 'flat',
+        observer_height_m: height,
+        target_height_m: height,
+        samples: [
+          sample(0, 0),
+          ...interior.map((elevation, i) => sample((i + 1) * spacing, elevation)),
+          sample(10_000, 0),
+        ],
+      });
+      if (sightline.kind !== 'evaluated') throw new Error('expected an evaluated result');
+      const fresnel = fresnelClearance({
+        clearances: sightline.clearances,
+        distance_m: 10_000,
+        frequency_mhz: 5_800,
+        missing_interior: sightline.missing_interior,
+      });
+      return { fresnel, sightline };
+    };
+
+    it('is sufficient when every interior sample has data and clears 0.6 of the zone: 20 m is 1.76 of 11.37 m', () => {
+      const { fresnel } = tenKm(20, [0]);
+      expect(fresnel.verdict).toBe('sufficient');
+      expect(fresnel.limiting?.index).toBe(1);
+      expect(fresnel.limiting?.fresnel_radius_m).toBeCloseTo(11.367537, 6);
+      expect(fresnel.limiting?.clearance_ratio).toBeCloseTo(1.759396, 6);
+      expect(fresnel.limiting?.clearance_m).toBe(20);
+    });
+
+    it('is insufficient on a geometrically clear line that clears under 0.6: 5 m is 0.44 of 11.37 m', () => {
+      const { fresnel, sightline } = tenKm(5, [0]);
+      expect(sightline.verdict).toBe('clear');
+      expect(fresnel.verdict).toBe('insufficient');
+      expect(fresnel.limiting?.clearance_ratio).toBeCloseTo(0.439849, 6);
+    });
+
+    it('is insufficient, with a negative ratio, wherever terrain blocks the line', () => {
+      const { fresnel, sightline } = tenKm(20, [30]);
+      expect(sightline.verdict).toBe('blocked');
+      expect(fresnel.verdict).toBe('insufficient');
+      expect(fresnel.limiting?.clearance_ratio).toBeCloseTo(-0.879698, 6);
+    });
+
+    it('is indeterminate when every sample with data clears 0.6 but another has none', () => {
+      const { fresnel, sightline } = tenKm(20, [0, undefined]);
+      expect(sightline.verdict).toBe('indeterminate');
+      expect(fresnel.verdict).toBe('indeterminate');
+      expect(fresnel.limiting?.index).toBe(1);
+      expect(fresnel.limiting?.fresnel_radius_m).toBeCloseTo(10.717416, 6);
+    });
+
+    it('is insufficient with a sample missing once a sample with data falls under 0.6', () => {
+      const { fresnel, sightline } = tenKm(5, [undefined, 0]);
+      expect(sightline.verdict).toBe('indeterminate');
+      expect(fresnel.verdict).toBe('insufficient');
+      expect(fresnel.limiting?.index).toBe(2);
+    });
+
+    it('is indeterminate with no limiting sample when no interior sample has data', () => {
+      const { fresnel } = tenKm(20, [undefined]);
+      expect(fresnel).toStrictEqual({ verdict: 'indeterminate' });
+    });
+
+    it('takes the smallest ratio, which can sit at another sample than the smallest clearance', () => {
+      const { fresnel, sightline } = tenKm(20, [15, 0, 0, 0, 13, 0, 0, 0, 0]);
+      expect(sightline.limiting).toMatchObject({ index: 1, clearance_m: 5 });
+      expect(fresnel.verdict).toBe('sufficient');
+      expect(fresnel.limiting).toMatchObject({ index: 5, clearance_m: 7, distance_m: 5_000 });
+      expect(fresnel.limiting?.clearance_ratio).toBeCloseTo(0.615789, 6);
+    });
+
+    it('resolves a ratio tie to the first sample', () => {
+      const { fresnel } = tenKm(20, [10, 0, 0, 0, 0, 0, 0, 0, 10]);
+      expect(fresnel.limiting?.index).toBe(1);
+      expect(fresnel.limiting?.clearance_ratio).toBeCloseTo(1.466163, 6);
+    });
+
+    it('holds the 0.6 bar inclusively, on unrounded ratios', () => {
+      const radius = firstFresnelRadius(5_000, 10_000, 5_800);
+      const verdictAt = (clearance_m: number) =>
+        fresnelClearance({
+          clearances: [
+            {
+              lat: 0,
+              lon: 0.045,
+              dataset: 'srtm30m',
+              clearance_m,
+              curvature_bulge_m: 0,
+              distance_m: 5_000,
+              index: 1,
+              sightline_elevation_m: 10,
+              surface_elevation_m: 10 - clearance_m,
+              terrain_elevation_m: 10 - clearance_m,
+            },
+          ],
+          distance_m: 10_000,
+          frequency_mhz: 5_800,
+          missing_interior: 0,
+        }).verdict;
+      expect((0.6 * radius) / radius).toBe(0.6);
+      expect(verdictAt(0.6 * radius)).toBe('sufficient');
+      expect(verdictAt(0.6 * radius + 1e-9)).toBe('sufficient');
+      expect(verdictAt(0.6 * radius - 1e-9)).toBe('insufficient');
+    });
+  });
+});
+
+describe('firstFresnelRadius', () => {
+  it.each([
+    ['the midpoint of a 10 km line at 5,800 MHz', 5_000, 10_000, 5_800, 11.37],
+    ['1 km from one end of that line', 1_000, 10_000, 5_800, 6.82],
+    ['1 km from its other end', 9_000, 10_000, 5_800, 6.82],
+    ['the midpoint of a 20 km line at 900 MHz', 10_000, 20_000, 900, 40.81],
+    ['the midpoint of a 50 km line at the 30 MHz floor', 25_000, 50_000, 30, 353.43],
+    ['the midpoint of a 1 km line at the 300 GHz ceiling', 500, 1_000, 300_000, 0.5],
+  ])('is %s: %d m', (_name, distance, total, frequency, expected) => {
+    expect(firstFresnelRadius(distance, total, frequency)).toBeCloseTo(expected, 2);
+  });
+
+  it('matches the unrounded golden value and uses the exact wavelength 299.792458 / f m', () => {
+    expect(firstFresnelRadius(5_000, 10_000, 5_800)).toBeCloseTo(11.367537, 6);
+    expect(firstFresnelRadius(5_000, 10_000, 5_800)).toBeCloseTo(
+      Math.sqrt(((299.792458 / 5_800) * 5_000 * 5_000) / 10_000),
+      12,
+    );
+  });
+
+  it('is 0 at either end', () => {
+    expect(firstFresnelRadius(0, 10_000, 5_800)).toBe(0);
+    expect(firstFresnelRadius(10_000, 10_000, 5_800)).toBe(0);
   });
 });

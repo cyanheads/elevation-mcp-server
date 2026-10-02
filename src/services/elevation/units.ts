@@ -14,6 +14,9 @@ export const METERS_PER_DEGREE = (Math.PI * EARTH_RADIUS_M) / 180;
 /** One international foot in meters. */
 export const METERS_PER_FOOT = 0.3048;
 
+/** Speed of light in meters per microsecond, so a wavelength in meters is this over a frequency in MHz. */
+export const SPEED_OF_LIGHT_M_PER_US = 299.792458;
+
 /**
  * Plausibility floor in meters. Below the deepest ocean point (about −10,935 m),
  * so it never clips a real sea-floor depth, and above the provider no-data
