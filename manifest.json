@@ -1,7 +1,7 @@
 {
   "manifest_version": "0.3",
   "name": "elevation-mcp-server",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Look up elevation worldwide, profile route ascent/descent, grid areas, check terrain line of sight.",
   "author": { "name": "cyanheads" },
   "repository": { "type": "git", "url": "https://github.com/cyanheads/elevation-mcp-server" },

@@ -1,6 +1,6 @@
 {
   "name": "@cyanheads/elevation-mcp-server",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "mcpName": "io.github.cyanheads/elevation-mcp-server",
   "description": "Look up elevation worldwide, profile route ascent/descent, grid areas, check terrain line of sight via MCP. STDIO or Streamable HTTP.",
   "author": "Casey Hand <casey@caseyjhand.com> (https://caseyjhand.com)",
