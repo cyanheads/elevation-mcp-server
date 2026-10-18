@@ -61,6 +61,8 @@ logs/
 # =============================================================================
 .env*
 !.env.example
+!.env.template
+!.env.sample
 .wrangler
 worker-configuration.d.ts
 
