@@ -14,8 +14,9 @@ import {
   formatDatasetsUsed,
   providerSplit,
   summarizeProvenance,
+  VerticalReferenceSchema,
 } from '@/mcp-server/tools/shared/outputs.js';
-import { attributionFor } from '@/services/elevation/attribution.js';
+import { attributionFor, verticalReferenceFor } from '@/services/elevation/attribution.js';
 import { getElevationSampler } from '@/services/elevation/elevation-sampler.js';
 import {
   type ClearancePoint,
@@ -96,7 +97,7 @@ export const checkLineOfSightTool = tool('elevation_check_line_of_sight', {
       'Evenly spaced terrain samples along the line, endpoints included (3–250, default 100). Spacing is reported; a ridge narrower than it can be missed.',
     ),
     water_surface_m: blankAsUnset(z.number().min(-500).max(9_000).optional()).describe(
-      "Water level in meters (-500 to 9,000). When set, each sample's surface, endpoints included, is the higher of its elevation and this level, replacing the default that lifts only Mapzen sea-floor values to 0 m. Set it where the line crosses water: 0 where USGS 3DEP reports a bay floor, or a lake or tide level.",
+      "Water level in meters (-500 to 9,000). When set, each sample's surface, endpoints included, is the higher of its elevation and this level, replacing the default that lifts only Mapzen sea-floor values to 0 m. Requires a vertical reference compatible with the sampled terrain; choosing zero or source opentopodata alone does not establish compatibility. No datum conversion is performed.",
     ),
     frequency_mhz: blankAsUnset(z.number().min(30).max(300_000).optional()).describe(
       'Radio frequency in MHz (30–300,000; 5800 for 5.8 GHz). When set, the result adds first Fresnel zone clearance against the 60% free-space bar; pair it with earth_model radio.',
@@ -181,6 +182,7 @@ export const checkLineOfSightTool = tool('elevation_check_line_of_sight', {
       .describe('The source the call used (auto unless the caller chose one).'),
   }),
   enrichment: {
+    vertical_reference: VerticalReferenceSchema,
     notice: z
       .string()
       .optional()
@@ -191,7 +193,10 @@ export const checkLineOfSightTool = tool('elevation_check_line_of_sight', {
       .string()
       .describe('Sources to credit for the returned values, one line per dataset that answered.'),
   },
-  enrichmentTrailer: { attribution: { label: 'Sources' } },
+  enrichmentTrailer: {
+    attribution: { label: 'Sources' },
+    vertical_reference: { label: 'Vertical reference' },
+  },
   errors: [
     {
       reason: 'same_endpoints',
@@ -281,7 +286,7 @@ export const checkLineOfSightTool = tool('elevation_check_line_of_sight', {
         { distance_m: roundTo(line.total_distance_m, 2) },
       );
     }
-    if (line.total_distance_m > MAX_SIGHTLINE_LENGTH_M) {
+    if (line.kind === 'antipodal' || line.total_distance_m > MAX_SIGHTLINE_LENGTH_M) {
       throw ctx.fail(
         'sightline_too_long',
         `Observer and target are ${roundTo(line.total_distance_m / 1_000, 3)} km apart; a sightline can be at most 1,000 km.`,
@@ -290,7 +295,10 @@ export const checkLineOfSightTool = tool('elevation_check_line_of_sight', {
     }
 
     const sampled = await getElevationSampler().sample(line.samples, input.source, ctx);
-    ctx.enrich({ attribution: attributionFor(sampled) });
+    ctx.enrich({
+      attribution: attributionFor(sampled),
+      vertical_reference: verticalReferenceFor(sampled, getElevationSampler().publicOpenTopoData),
+    });
 
     const los = lineOfSight({
       distance_m: line.total_distance_m,

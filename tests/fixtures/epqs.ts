@@ -47,12 +47,13 @@ export const EPQS_RESOLUTION_NINTH_ARCSEC = 0.0000308642;
 export const EPQS_RESOLUTION_THIRD_ARCSEC = 0.0000925926;
 export const EPQS_RESOLUTION_ONE_ARCSEC = 0.0002777777796234786;
 
-/** The four miss texts EPQS answers with on HTTP 200 (wording varies between identical requests). */
+/** The five miss texts EPQS answers with on HTTP 200 (wording varies between identical requests). */
 export const EPQS_MISS_TEXTS = {
   invalidParameters: 'Invalid or missing input parameters.',
   callFailed: 'Call failed.  [Failed cloud operation: Open, Path: /vsimem/_a1b2c3_aux.xml]',
   transformationUnavailable: 'Transformation is unavailable for the current image.',
   emptyGeometry: 'The operation was attempted on an empty geometry.',
+  tableNotFound: 'The table was not found. [AMD_DEP3Elevation_SML]',
 } as const;
 
 /** Also a 200 plain-text body: an unknown `wkid`. */

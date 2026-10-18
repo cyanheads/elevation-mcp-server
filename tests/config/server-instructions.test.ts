@@ -79,4 +79,12 @@ describe('buildServerInstructions', () => {
     );
     expect(text).not.toContain('Mapzen values below 0 m over open water are sea-floor depths');
   });
+
+  it('explains bounded prefix validation and sliced continuation', () => {
+    const text = onPublicHost('https://topo.example.test');
+    expect(text).toContain('1–1,000 positions');
+    expect(text).toContain('first 100 are validated and sampled');
+    expect(text).toContain('unvalidated tail');
+    expect(text).toContain('originalPoints.slice(next_offset) until null');
+  });
 });

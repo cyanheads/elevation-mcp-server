@@ -16,8 +16,9 @@ import {
   providerSplit,
   ResolutionRangeSchema,
   summarizeProvenance,
+  VerticalReferenceSchema,
 } from '@/mcp-server/tools/shared/outputs.js';
-import { attributionFor } from '@/services/elevation/attribution.js';
+import { attributionFor, verticalReferenceFor } from '@/services/elevation/attribution.js';
 import { getElevationSampler } from '@/services/elevation/elevation-sampler.js';
 import { gridNodes } from '@/services/elevation/geometry.js';
 import { DATASETS, type Dataset, type Sample, SOURCE_MODES } from '@/services/elevation/types.js';
@@ -134,6 +135,7 @@ export const getGridTool = tool('elevation_get_grid', {
       .describe('The source the call used (auto unless the caller chose one).'),
   }),
   enrichment: {
+    vertical_reference: VerticalReferenceSchema,
     notice: z
       .string()
       .optional()
@@ -144,7 +146,10 @@ export const getGridTool = tool('elevation_get_grid', {
       .string()
       .describe('Sources to credit for the returned values, one line per dataset that answered.'),
   },
-  enrichmentTrailer: { attribution: { label: 'Sources' } },
+  enrichmentTrailer: {
+    attribution: { label: 'Sources' },
+    vertical_reference: { label: 'Vertical reference' },
+  },
   errors: [
     {
       reason: 'invalid_bbox',
@@ -250,7 +255,10 @@ export const getGridTool = tool('elevation_get_grid', {
 
     const grid = gridNodes({ south, west, north, east }, rows, cols);
     const sampled = await getElevationSampler().sample(grid.nodes, input.source, ctx);
-    ctx.enrich({ attribution: attributionFor(sampled) });
+    ctx.enrich({
+      attribution: attributionFor(sampled),
+      vertical_reference: verticalReferenceFor(sampled, getElevationSampler().publicOpenTopoData),
+    });
 
     const elevations_m: (number | null)[][] = [];
     const cell_datasets: (Dataset | null)[][] = [];

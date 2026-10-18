@@ -12,19 +12,22 @@ import { EARTH_RADIUS_M, METERS_PER_DEGREE, roundTo, SPEED_OF_LIGHT_M_PER_US } f
 const toRadians = (degrees: number) => (degrees * Math.PI) / 180;
 const toDegrees = (radians: number) => (radians * 180) / Math.PI;
 
-/** Great-circle distance in meters between two points (haversine on the mean sphere). */
+/** Great-circle distance in meters, using a vector angle stable near both zero and pi. */
 export function haversineDistance(a: LatLon, b: LatLon): number {
-  const phiA = toRadians(a.lat);
-  const phiB = toRadians(b.lat);
-  const sinHalfDeltaPhi = Math.sin((phiB - phiA) / 2);
-  const sinHalfDeltaLambda = Math.sin(toRadians(b.lon - a.lon) / 2);
-  const h =
-    sinHalfDeltaPhi * sinHalfDeltaPhi +
-    Math.cos(phiA) * Math.cos(phiB) * sinHalfDeltaLambda * sinHalfDeltaLambda;
-  return 2 * EARTH_RADIUS_M * Math.asin(Math.min(1, Math.sqrt(h)));
+  const { sine, cosine } = vectorAngle(toVector(a), toVector(b));
+  return EARTH_RADIUS_M * Math.atan2(sine, cosine);
 }
 
 type Vector = readonly [number, number, number];
+
+function cross(a: Vector, b: Vector): Vector {
+  return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+}
+
+function vectorAngle(a: Vector, b: Vector) {
+  const normal = cross(a, b);
+  return { normal, sine: Math.hypot(...normal), cosine: a[0] * b[0] + a[1] * b[1] + a[2] * b[2] };
+}
 
 function toVector({ lat, lon }: LatLon): Vector {
   const phi = toRadians(lat);
@@ -45,21 +48,30 @@ function toLatLon([x, y, z]: Vector): LatLon {
 export function interpolateGreatCircle(a: LatLon, b: LatLon, fraction: number): LatLon {
   if (fraction <= 0) return { lat: a.lat, lon: a.lon };
   if (fraction >= 1) return { lat: b.lat, lon: b.lon };
-  const delta = haversineDistance(a, b) / EARTH_RADIUS_M;
-  if (delta < 1e-12) return { lat: a.lat, lon: a.lon };
   const va = toVector(a);
   const vb = toVector(b);
-  const sinDelta = Math.sin(delta);
-  const wa = Math.sin((1 - fraction) * delta) / sinDelta;
-  const wb = Math.sin(fraction * delta) / sinDelta;
-  return toLatLon([wa * va[0] + wb * vb[0], wa * va[1] + wb * vb[1], wa * va[2] + wb * vb[2]]);
+  const { normal, sine, cosine } = vectorAngle(va, vb);
+  const delta = Math.atan2(sine, cosine);
+  if (delta < 1e-12) return { lat: a.lat, lon: a.lon };
+  const tangent = cross(normal, va);
+  const c = Math.cos(fraction * delta);
+  const s = Math.sin(fraction * delta) / sine;
+  return toLatLon([
+    c * va[0] + s * tangent[0],
+    c * va[1] + s * tangent[1],
+    c * va[2] + s * tangent[2],
+  ]);
 }
 
 /** Drops each vertex equal to its predecessor after rounding both coordinates to 6 decimals. */
 export function dropConsecutiveDuplicates(path: readonly LatLon[]): LatLon[] {
-  const kept: LatLon[] = [];
-  for (const vertex of path) {
-    const previous = kept.at(-1);
+  return distinctVertices(path).map(({ point }) => point);
+}
+
+function distinctVertices(path: readonly LatLon[]): { point: LatLon; index: number }[] {
+  const kept: { point: LatLon; index: number }[] = [];
+  for (const [index, vertex] of path.entries()) {
+    const previous = kept.at(-1)?.point;
     if (
       previous &&
       roundTo(previous.lat, 6) === roundTo(vertex.lat, 6) &&
@@ -67,7 +79,7 @@ export function dropConsecutiveDuplicates(path: readonly LatLon[]): LatLon[] {
     ) {
       continue;
     }
-    kept.push({ lat: vertex.lat, lon: vertex.lon });
+    kept.push({ point: { lat: vertex.lat, lon: vertex.lon }, index });
   }
   return kept;
 }
@@ -84,6 +96,7 @@ export interface PathSample extends LatLon {
  */
 export type PathResampling =
   | { kind: 'degenerate'; total_distance_m: number; vertices: number }
+  | { kind: 'antipodal'; start_index: number; end_index: number; total_distance_m: number }
   | {
       kind: 'ok';
       sample_interval_m: number;
@@ -103,7 +116,21 @@ export const MIN_PATH_LENGTH_M = 1;
  * sample set. Distances are unrounded.
  */
 export function resamplePath(path: readonly LatLon[], count: number): PathResampling {
-  const vertices = dropConsecutiveDuplicates(path);
+  const retained = distinctVertices(path);
+  const vertices = retained.map(({ point }) => point);
+  for (let index = 0; index + 1 < retained.length; index++) {
+    const a = retained[index] as { point: LatLon; index: number };
+    const b = retained[index + 1] as { point: LatLon; index: number };
+    const { sine, cosine } = vectorAngle(toVector(a.point), toVector(b.point));
+    if (cosine < 0 && sine <= 1e-12) {
+      return {
+        kind: 'antipodal',
+        start_index: a.index,
+        end_index: b.index,
+        total_distance_m: Math.PI * EARTH_RADIUS_M,
+      };
+    }
+  }
   const cumulative = [0];
   for (let k = 0; k + 1 < vertices.length; k++) {
     cumulative.push(

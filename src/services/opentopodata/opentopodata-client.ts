@@ -141,6 +141,11 @@ export class OpenTopoDataClient {
       options.dailyPacer ?? (this.#publicInstance ? createOpenTopoDataDailyPacer() : undefined);
   }
 
+  /** Whether this client queries the published public dataset stack. */
+  get publicInstance(): boolean {
+    return this.#publicInstance;
+  }
+
   /** Looks up 1–100 points in one request; coordinates are sent at 6 decimals. */
   async lookup(
     points: readonly LatLon[],

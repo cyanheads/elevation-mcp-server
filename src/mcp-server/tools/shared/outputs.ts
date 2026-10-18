@@ -8,6 +8,13 @@
 import { z } from '@cyanheads/mcp-ts-core';
 import { DATASETS, type Dataset } from '@/services/elevation/types.js';
 
+/** Required height-reference context, rendered by every tool's enrichment trailer. */
+export const VerticalReferenceSchema = z
+  .string()
+  .describe(
+    'Height-reference context per answering dataset, including unverified references and whether heights share a datum. No vertical datum conversion is performed.',
+  );
+
 /** Count of values each dataset answered. */
 export const DatasetsUsedSchema = z
   .object({

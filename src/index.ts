@@ -12,6 +12,10 @@ import {
   disposeElevationServices,
   initElevationServices,
 } from './services/elevation/elevation-sampler.js';
+import {
+  createProviderTransport,
+  type ProviderTransport,
+} from './services/shared/provider-fetch.js';
 
 /**
  * The instructions are built from config before `createApp()` loads `.env`,
@@ -25,16 +29,19 @@ try {
 }
 
 const config = getServerConfig();
+let providerTransport: ProviderTransport | undefined;
 
 await createApp({
   name: 'elevation-mcp-server',
   title: 'elevation-mcp-server',
   tools: allToolDefinitions,
   instructions: buildServerInstructions(config),
-  setup() {
-    initElevationServices(config);
+  async setup() {
+    providerTransport = await createProviderTransport();
+    initElevationServices(config, { fetch: providerTransport.fetch });
   },
-  teardown() {
+  async teardown() {
     disposeElevationServices();
+    await providerTransport?.close();
   },
 });

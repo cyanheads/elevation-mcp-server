@@ -127,6 +127,11 @@ export class ElevationSampler {
     this.#budgetMs = options.budgetMs ?? SAMPLING_BUDGET_MS;
   }
 
+  /** Whether Open Topo Data results use the public instance's published rasters. */
+  get publicOpenTopoData(): boolean {
+    return this.#openTopoData.publicInstance;
+  }
+
   async sample(points: readonly LatLon[], mode: SourceMode, ctx: Context): Promise<Sample[]> {
     const startedAt = this.#now();
     const deadlineAt = startedAt + this.#budgetMs;

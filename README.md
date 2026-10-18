@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.1.2-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/elevation-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.1.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/elevation-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/elevation-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.1.2-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/elevation-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.1.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/elevation-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/elevation-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.3-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -29,7 +29,7 @@
 
 ## Overview
 
-Ground elevation and terrain analysis from two keyless sources: USGS 3DEP across the US and its territories (plus much of Canada and Mexico), and Open Topo Data everywhere else, which answers from SRTM GL1 v3 and, where SRTM has no tile, Mapzen terrain tiles. Look up spot heights, measure a route's ascent, descent, and grades, find an area's high and low points, and check whether terrain blocks a sightline. Runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
+Elevation and terrain analysis anywhere on Earth, from USGS 3DEP (1–30 m across the US) and Open Topo Data worldwide. Look up spot heights, measure a route's climbs and grades, find an area's high and low points, and check whether terrain blocks a line of sight. No API key required.
 
 ### Tools
 
@@ -42,9 +42,12 @@ Ground elevation and terrain analysis from two keyless sources: USGS 3DEP across
 
 ## Capability reference
 
+Every successful result includes `vertical_reference` on both response surfaces. Public SRTM uses EGM96; NAVD88 is typical for 3DEP in the conterminous US, but the returned raster reference is unverified and can vary elsewhere. Mapzen and self-hosted Open Topo Data references are unknown/variable. No-data-only results establish no height reference. Heights are returned without transformation; mixed datasets are not normalized to a common datum. `water_surface_m` needs a compatible terrain reference; zero or `source: opentopodata` alone does not establish compatibility.
+
 ### `elevation_get_points` <sub>tool</sub>
 
-- `points`: 1–100 `{lat, lon}` objects in decimal degrees (WGS84)
+- `points`: 1–1,000 `{lat, lon}` objects in decimal degrees (WGS84), or a single point. Only the first 100 are validated and sampled; the remainder stays unvalidated
+- `requested_points`, `processed_points`, and `remaining_points` count submitted positions, including duplicates and misses. `next_offset` is the index after this call's processed prefix, or `null` when exhausted; continue with `originalPoints.slice(next_offset)`, where `originalPoints` is the array submitted in that call. Use each newly submitted array for the next slice
 - Each point comes back `ok` or `no_data` (a miss never fails the call), with `elevation_m` / `elevation_ft`, `dataset`, and `resolution_m` (omitted for `mapzen`); 3DEP answers add `raster_id` and `acquisition_date`. `points_with_data` counts the hits
 
 ---
@@ -52,7 +55,7 @@ Ground elevation and terrain analysis from two keyless sources: USGS 3DEP across
 ### `elevation_get_profile` <sub>tool</sub>
 
 - `path`: 2–1,000 vertices in travel order (consecutive duplicates dropped); `samples`: 2–250 evenly spaced points along it, endpoints included (default 100)
-- `summary` carries `total_distance_m`, `ascent_m` / `descent_m` (and feet), start, end, min, and max elevation, `highest_point` / `lowest_point`, and `max_grade_pct` / `min_grade_pct` with where each occurs; ascent depends on the reported `sample_interval_m`. Fails as `degenerate_path` (under 1 m of route) or `no_coverage` (no sample has data)
+- `summary` carries `total_distance_m`, `ascent_m` / `descent_m` (and feet), start, end, min, and max elevation, `highest_point` / `lowest_point`, and `max_grade_pct` / `min_grade_pct` with where each occurs; ascent depends on the reported `sample_interval_m`. Fails as `degenerate_path` (under 1 m of route), `antipodal_path` (add an intermediate waypoint between the identified zero-based input vertices), or `no_coverage` (no sample has data)
 - `include_samples` (default `true`) returns `samples[]` (distance, position, elevation, grade, dataset, and resolution per sample); `false` omits it and the sample table, and the rest of the result is unchanged
 
 ---
@@ -240,7 +243,7 @@ See [`.env.example`](./.env.example) for every server setting and the common fra
 - **Global resolution.** SRTM is a 30 m radar surface model. Mapzen's 1 arc-second grid is interpolated in places from coarser sources (GMTED2010 at 7.5 arc-seconds over parts of the high latitudes, ETOPO1 at about 1.8 km over the open ocean). Outside 3DEP coverage, profile ascent is underestimated and line of sight misses terrain narrower than the source's true resolution.
 - **Whole-meter values.** Open Topo Data's datasets are integer rasters, and the upstream rounds the interpolated result to the nearest meter, so ascent and descent over gentle terrain include 1 m quantization steps.
 - **Water.** SRTM reports water inside a land tile as 0 m. Beyond SRTM's tiles, Mapzen reports sea-floor depth, and points, profiles, and grids include it. 3DEP values over water depend on the raster: a hydro-flattened surface, sea level, or bathymetry. Line of sight measures clearance to 0 m over Mapzen values below 0, but uses 3DEP values below 0 m as received, since nothing in a USGS answer tells bay floor from dry land below sea level; its notice flags them, and `water_surface_m` measures a line over water to the water instead.
-- **Mixed models.** 3DEP is a bare-earth DEM referenced to NAVD 88 in the conterminous US (local datums in some territories). SRTM is a radar surface model that partly includes canopy and buildings, referenced to EGM96. Mapzen blends both by region. Differences of a meter or more between datasets at the same point are expected; per-value provenance shows which applies.
+- **Mixed models.** 3DEP is a bare-earth DEM, typically NAVD88 in the conterminous US; the exact returned raster reference is unverified and can vary elsewhere. Public SRTM is a radar surface model that partly includes canopy and buildings, using EGM96. Mapzen blends regional sources; self-hosted dataset names do not verify the reference. Heights are not transformed to a common datum, and datum alone does not explain differences between providers.
 - **Sampling.** Features narrower than the sample spacing are missed: a ridge between line-of-sight samples, a summit between grid nodes (re-grid a smaller box around `summary.highest` to refine it), short climbs between profile samples. Spacing is always reported.
 - **USGS 3DEP throughput.** The point query service has no published limit and no batch endpoint: about 10 points per second at this server's pacing, hence the 250-sample cap and 45 s budget. A call whose lookups would push the queue past a running call's budget is refused at once with `sampling_deadline_exceeded` and `data.retryAfter`, so two 250-sample calls at once run in turn: the second can be retried after about 25 s.
 - **Acquisition dates** from USGS are passed through raw in M/D/YYYY form, which sometimes carries a zero month or day; any other form is omitted.

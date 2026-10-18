@@ -104,7 +104,11 @@ describe('elevation_get_grid definition', () => {
     >;
     expect(enrichment.attribution?.safeParse(undefined).success).toBe(false);
     expect(enrichment.notice?.safeParse(undefined).success).toBe(true);
-    expect(getGridTool.enrichmentTrailer).toEqual({ attribution: { label: 'Sources' } });
+    expect(enrichment.vertical_reference?.safeParse(undefined).success).toBe(false);
+    expect(getGridTool.enrichmentTrailer).toEqual({
+      attribution: { label: 'Sources' },
+      vertical_reference: { label: 'Vertical reference' },
+    });
   });
 });
 

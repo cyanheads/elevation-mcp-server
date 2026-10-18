@@ -211,6 +211,7 @@ describe('elevation_check_line_of_sight definition', () => {
     expect(enrichment.notice?.safeParse(undefined).success).toBe(true);
     expect(checkLineOfSightTool.enrichmentTrailer).toEqual({
       attribution: { label: 'Sources' },
+      vertical_reference: { label: 'Vertical reference' },
     });
   });
 });

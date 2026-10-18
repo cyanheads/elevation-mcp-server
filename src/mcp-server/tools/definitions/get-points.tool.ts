@@ -1,5 +1,5 @@
 /**
- * @fileoverview `elevation_get_points`: ground elevation at 1–100 coordinates,
+ * @fileoverview `elevation_get_points`: ground elevation for a bounded prefix of coordinates,
  * with the dataset and resolution behind every value.
  * @module mcp-server/tools/definitions/get-points
  */
@@ -8,8 +8,12 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { agree, countOf, inlineText } from '@/mcp-server/tools/shared/format.js';
 import { boundedArray, PointSchema, SourceSchema } from '@/mcp-server/tools/shared/inputs.js';
-import { providerSplit, summarizeProvenance } from '@/mcp-server/tools/shared/outputs.js';
-import { attributionFor } from '@/services/elevation/attribution.js';
+import {
+  providerSplit,
+  summarizeProvenance,
+  VerticalReferenceSchema,
+} from '@/mcp-server/tools/shared/outputs.js';
+import { attributionFor, verticalReferenceFor } from '@/services/elevation/attribution.js';
 import { getElevationSampler } from '@/services/elevation/elevation-sampler.js';
 import {
   DATASETS,
@@ -20,6 +24,32 @@ import {
 import { metersToFeet } from '@/services/elevation/units.js';
 
 const MAX_POINTS = 100;
+
+/** Keeps the submitted length, normalizing and validating only the served prefix in a fresh array. */
+const PointsSchema = z.preprocess(
+  (value, ctx) => {
+    const points =
+      value !== null && typeof value === 'object' && !Array.isArray(value) ? [value] : value;
+    if (!Array.isArray(points) || points.length > 1_000) return points;
+    return points.map((point, index) => {
+      if (index >= MAX_POINTS) return point;
+      const parsed = PointSchema.safeParse(point);
+      if (parsed.success) return parsed.data;
+      for (const issue of parsed.error.issues)
+        ctx.addIssue({ ...issue, path: [index, ...issue.path] });
+      return point;
+    });
+  },
+  boundedArray(
+    z
+      .unknown()
+      .describe(
+        'A {lat, lon} point: latitude -90 to 90, longitude -180 to 180 (WGS84). The first 100 positions are validated; the unserved tail is unvalidated. latitude, longitude, lng, and long aliases are accepted.',
+      ),
+    1,
+    1_000,
+  ),
+);
 
 const PointResultSchema = z
   .object({
@@ -65,29 +95,45 @@ type PointResult = z.infer<typeof PointResultSchema>;
 export const getPointsTool = tool('elevation_get_points', {
   title: 'Get Point Elevations',
   description:
-    "Look up ground elevation at up to 100 coordinates in one call, in meters and feet, with the dataset and resolution behind every point. Inside USGS 3DEP coverage (the US and its territories, plus much of Canada and Mexico) values come from 3DEP at 1–30 m resolution. Elsewhere they come from Open Topo Data: SRTM at about 30 m on land between 60°N and 56°S, and Mapzen terrain tiles beyond SRTM's coverage and over the ocean, where values below 0 m are sea-floor depths. A point with no data in any queried dataset returns status no_data instead of failing the call.",
+    "Look up ground elevation at up to 100 coordinates in one call, in meters and feet, with the dataset and resolution behind every point. Accepts up to 1,000 submitted positions; only the first 100 are validated and sampled, with counts and next_offset identifying the unvalidated remainder. Continue with originalPoints.slice(next_offset). Inside USGS 3DEP coverage (the US and its territories, plus much of Canada and Mexico) values come from 3DEP at 1–30 m resolution. Elsewhere they come from Open Topo Data: SRTM at about 30 m on land between 60°N and 56°S, and Mapzen terrain tiles beyond SRTM's coverage and over the ocean, where values below 0 m are sea-floor depths. A point with no data in any queried dataset returns status no_data instead of failing the call.",
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   auth: ['tool:elevation_get_points:read'],
   input: z.object({
-    points: z
-      .preprocess(
-        (value) =>
-          value !== null && typeof value === 'object' && !Array.isArray(value) ? [value] : value,
-        boundedArray(PointSchema, 1, MAX_POINTS),
-      )
-      .describe(
-        '1–100 points as {lat, lon} objects in decimal degrees (WGS84). latitude, longitude, and lng keys are also accepted.',
-      ),
+    points: PointsSchema.describe(
+      '1–1,000 submitted positions as {lat, lon} objects in decimal degrees (WGS84), or one point object. Only the first 100 are validated and sampled; an invalid unserved tail is validated when resubmitted. Coordinate aliases latitude, longitude, lng, and long are accepted.',
+    ),
     source: SourceSchema,
   }),
   output: z.object({
-    points: z.array(PointResultSchema).describe('One entry per input point, in input order.'),
+    points: z
+      .array(PointResultSchema)
+      .describe('One entry per processed position, in input order, at most 100.'),
+    requested_points: z
+      .number()
+      .int()
+      .describe('Submitted positions, including duplicates and coverage misses.'),
+    processed_points: z
+      .number()
+      .int()
+      .describe('Positions validated and sampled in this call, at most 100.'),
+    remaining_points: z
+      .number()
+      .int()
+      .describe('Unprocessed, unvalidated positions remaining in this input.'),
+    next_offset: z
+      .number()
+      .int()
+      .nullable()
+      .describe(
+        'Zero-based index immediately after the processed prefix in this call, or null when exhausted. Continue with originalPoints.slice(next_offset), where originalPoints is the array submitted in this call; use each newly submitted array for its next slice.',
+      ),
     points_with_data: z.number().int().describe('Number of points with status ok.'),
     source_mode: z
       .enum(SOURCE_MODES)
       .describe('The source the call used (auto unless the caller chose one).'),
   }),
   enrichment: {
+    vertical_reference: VerticalReferenceSchema,
     notice: z
       .string()
       .optional()
@@ -98,7 +144,10 @@ export const getPointsTool = tool('elevation_get_points', {
       .string()
       .describe('Sources to credit for the returned values, one line per dataset that answered.'),
   },
-  enrichmentTrailer: { attribution: { label: 'Sources' } },
+  enrichmentTrailer: {
+    attribution: { label: 'Sources' },
+    vertical_reference: { label: 'Vertical reference' },
+  },
   errors: [
     {
       reason: 'usgs_unavailable',
@@ -156,8 +205,12 @@ export const getPointsTool = tool('elevation_get_points', {
   ],
 
   async handler(input, ctx) {
-    const samples = await getElevationSampler().sample(input.points, input.source, ctx);
-    ctx.enrich({ attribution: attributionFor(samples) });
+    const served = input.points.slice(0, MAX_POINTS).map((point) => PointSchema.parse(point));
+    const samples = await getElevationSampler().sample(served, input.source, ctx);
+    ctx.enrich({
+      attribution: attributionFor(samples),
+      vertical_reference: verticalReferenceFor(samples, getElevationSampler().publicOpenTopoData),
+    });
 
     const points = samples.map(toPointResult);
     const notice = buildNotice(points, input.source);
@@ -165,6 +218,10 @@ export const getPointsTool = tool('elevation_get_points', {
 
     return {
       points,
+      requested_points: input.points.length,
+      processed_points: served.length,
+      remaining_points: input.points.length - served.length,
+      next_offset: input.points.length > served.length ? served.length : null,
       points_with_data: points.filter((point) => point.status === 'ok').length,
       source_mode: input.source,
     };
@@ -188,6 +245,12 @@ export const getPointsTool = tool('elevation_get_points', {
     });
     const text = [
       `**${result.points_with_data} of ${result.points.length} points have elevation data** (source: ${result.source_mode})`,
+      `Requested: ${result.requested_points}; processed: ${result.processed_points}; remaining: ${result.remaining_points}; next_offset: ${result.next_offset === null ? 'null (exhausted)' : result.next_offset}. Sampling cap: 100 positions.`,
+      ...(result.next_offset === null
+        ? []
+        : [
+            `The remaining tail is unvalidated. Continue with originalPoints.slice(${result.next_offset}) (originalPoints.slice(next_offset)), where originalPoints is the array submitted in this call. Use the newly submitted array for the next slice.`,
+          ]),
       '',
       '| # | Lat, Lon | Status | Elevation (m / ft) | Dataset | Resolution (m) | Raster | Acquired |',
       '|--:|:--|:--|--:|:--|--:|--:|:--|',

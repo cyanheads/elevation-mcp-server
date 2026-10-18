@@ -8,6 +8,7 @@ import {
   attributionFor,
   MAPZEN_ATTRIBUTION,
   NO_DATASET_ATTRIBUTION,
+  verticalReferenceFor,
 } from '@/services/elevation/attribution.js';
 import type { Dataset } from '@/services/elevation/types.js';
 
@@ -40,6 +41,49 @@ const MAPZEN_BLOCK = [
 
 const answered = (...datasets: (Dataset | undefined)[]) =>
   datasets.map((dataset) => (dataset === undefined ? {} : { dataset }));
+
+describe('verticalReferenceFor', () => {
+  it.each([
+    ['usgs_3dep', 'NAVD88'],
+    ['srtm30m', 'EGM96'],
+    ['mapzen', 'unknown/variable'],
+  ] as const)('qualifies %s independently of missing per-raster metadata', (dataset, reference) => {
+    const text = verticalReferenceFor(answered(dataset, dataset), true);
+    expect(text).toContain(reference);
+    expect(text.split(`${dataset}:`)).toHaveLength(2);
+    expect(text).toContain('without transformation');
+    if (dataset === 'usgs_3dep') {
+      expect(text).toContain('typical');
+      expect(text).toContain('unverified');
+      expect(text).toContain('vary elsewhere');
+    }
+    expect(text).not.toContain('Mixed datasets');
+  });
+
+  it.each([
+    ['usgs_3dep', 'srtm30m'],
+    ['srtm30m', 'mapzen'],
+    ['usgs_3dep', 'srtm30m', 'mapzen'],
+  ] as Dataset[][])('warns about mixed references %j', (...datasets) => {
+    const text = verticalReferenceFor(answered(...datasets), true);
+    expect(text).toContain('not normalized to a common vertical datum');
+    for (const dataset of datasets) expect(text).toContain(`${dataset}:`);
+  });
+
+  it.each(['srtm30m', 'mapzen'] as const)('does not trust self-hosted %s', (dataset) => {
+    const text = verticalReferenceFor(answered(dataset), false);
+    expect(text).toContain('self-hosted');
+    expect(text).toContain('unverified');
+    expect(text).not.toContain('EGM96');
+  });
+
+  it.each([{ values: [] }, { values: [null, {}, { dataset: undefined }] }])(
+    'makes no reference claim for $values',
+    ({ values }) => {
+      expect(verticalReferenceFor(values, true)).toContain('No height reference was established');
+    },
+  );
+});
 
 describe('MAPZEN_ATTRIBUTION', () => {
   it('is the published multi-source block, verbatim', () => {

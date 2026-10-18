@@ -21,8 +21,9 @@ import {
   providerSplit,
   ResolutionRangeSchema,
   summarizeProvenance,
+  VerticalReferenceSchema,
 } from '@/mcp-server/tools/shared/outputs.js';
-import { attributionFor } from '@/services/elevation/attribution.js';
+import { attributionFor, verticalReferenceFor } from '@/services/elevation/attribution.js';
 import { getElevationSampler } from '@/services/elevation/elevation-sampler.js';
 import { profileStats, resamplePath } from '@/services/elevation/geometry.js';
 import {
@@ -98,7 +99,7 @@ export const getProfileTool = tool('elevation_get_profile', {
   auth: ['tool:elevation_get_profile:read'],
   input: z.object({
     path: boundedArray(PointSchema, 2, 1_000).describe(
-      'Route vertices in travel order, 2–1,000 {lat, lon} objects in decimal degrees (WGS84). Consecutive duplicate vertices are ignored.',
+      'Route vertices in travel order, 2–1,000 {lat, lon} objects in decimal degrees (WGS84). Consecutive duplicate vertices are ignored. Antipodal retained segments require an intermediate waypoint, even with endpoint-only sampling; errors identify zero-based submitted vertex indices.',
     ),
     samples: blankAsUnset(z.number().int().min(2).max(MAX_SAMPLES).default(100)).describe(
       'Number of evenly spaced samples along the route, endpoints included (2–250, default 100). More samples catch more relief and take longer; spacing finer than the source resolution adds no detail. For a large count where only the summary matters, set include_samples to false.',
@@ -174,6 +175,7 @@ export const getProfileTool = tool('elevation_get_profile', {
       .describe('The source the call used (auto unless the caller chose one).'),
   }),
   enrichment: {
+    vertical_reference: VerticalReferenceSchema,
     notice: z
       .string()
       .optional()
@@ -184,8 +186,19 @@ export const getProfileTool = tool('elevation_get_profile', {
       .string()
       .describe('Sources to credit for the returned values, one line per dataset that answered.'),
   },
-  enrichmentTrailer: { attribution: { label: 'Sources' } },
+  enrichmentTrailer: {
+    attribution: { label: 'Sources' },
+    vertical_reference: { label: 'Vertical reference' },
+  },
   errors: [
+    {
+      reason: 'antipodal_path',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'A retained path segment has antipodal endpoints after dropping consecutive duplicates, so its shorter arc is ambiguous.',
+      recovery:
+        'Re-call elevation_get_profile with an intermediate waypoint between the identified path vertices to choose the intended route.',
+      severity: 'notice',
+    },
     {
       reason: 'degenerate_path',
       code: JsonRpcErrorCode.ValidationError,
@@ -259,6 +272,13 @@ export const getProfileTool = tool('elevation_get_profile', {
 
   async handler(input, ctx) {
     const route = resamplePath(input.path, input.samples);
+    if (route.kind === 'antipodal') {
+      throw ctx.fail(
+        'antipodal_path',
+        `Path vertices ${route.start_index} and ${route.end_index} are antipodal; add an intermediate waypoint.`,
+        { start_index: route.start_index, end_index: route.end_index },
+      );
+    }
     if (route.kind === 'degenerate') {
       throw ctx.fail(
         'degenerate_path',
@@ -268,7 +288,10 @@ export const getProfileTool = tool('elevation_get_profile', {
     }
 
     const sampled = await getElevationSampler().sample(route.samples, input.source, ctx);
-    ctx.enrich({ attribution: attributionFor(sampled) });
+    ctx.enrich({
+      attribution: attributionFor(sampled),
+      vertical_reference: verticalReferenceFor(sampled, getElevationSampler().publicOpenTopoData),
+    });
 
     const located: LocatedSample[] = sampled.map((sample, index) => ({
       ...sample,

@@ -1,6 +1,6 @@
 # elevation-mcp-server - Directory Structure
 
-Generated on: 2026-10-01 13:28:31
+Generated on: 2026-10-18 05:40:55
 
 ```text
 elevation-mcp-server/
@@ -130,6 +130,7 @@ elevation-mcp-server/
 │   ├── lint-mcp.ts
 │   ├── lint-packaging.ts
 │   ├── list-skills.ts
+│   ├── prune-musl-packages.ts
 │   ├── release-github.ts
 │   └── tree.ts
 ├── src/
@@ -158,7 +159,8 @@ elevation-mcp-server/
 │   │   ├── opentopodata/
 │   │   │   └── opentopodata-client.ts
 │   │   ├── shared/
-│   │   │   └── http-attempt.ts
+│   │   │   ├── http-attempt.ts
+│   │   │   └── provider-fetch.ts
 │   │   └── usgs-epqs/
 │   │       └── usgs-epqs-client.ts
 │   └── index.ts
@@ -172,10 +174,12 @@ elevation-mcp-server/
 │   │   ├── opentopodata.ts
 │   │   └── tool-harness.ts
 │   ├── services/
+│   │   ├── antipodal.test.ts
 │   │   ├── attribution.test.ts
 │   │   ├── elevation-sampler.test.ts
 │   │   ├── geometry.test.ts
 │   │   ├── opentopodata-client.test.ts
+│   │   ├── provider-fetch.test.ts
 │   │   ├── units.test.ts
 │   │   └── usgs-epqs-client.test.ts
 │   ├── shared/
@@ -187,7 +191,9 @@ elevation-mcp-server/
 │       ├── error-contracts.test.ts
 │       ├── get-grid.tool.test.ts
 │       ├── get-points.tool.test.ts
-│       └── get-profile.tool.test.ts
+│       ├── get-profile.tool.test.ts
+│       ├── points-prefix.test.ts
+│       └── vertical-reference.test.ts
 ├── .dockerignore
 ├── .env.example
 ├── .gitattributes

@@ -82,6 +82,7 @@ describe('elevation_get_profile definition', () => {
   it('declares the two handler reasons and the six service reasons, each recovery naming this tool', () => {
     const errors = getProfileTool.errors ?? [];
     expect(errors.map((error) => [error.reason, error.code])).toEqual([
+      ['antipodal_path', JsonRpcErrorCode.ValidationError],
       ['degenerate_path', JsonRpcErrorCode.ValidationError],
       ['no_coverage', JsonRpcErrorCode.NotFound],
       ['usgs_unavailable', JsonRpcErrorCode.ServiceUnavailable],
@@ -103,11 +104,36 @@ describe('elevation_get_profile definition', () => {
     >;
     expect(enrichment.attribution?.safeParse(undefined).success).toBe(false);
     expect(enrichment.notice?.safeParse(undefined).success).toBe(true);
-    expect(getProfileTool.enrichmentTrailer).toEqual({ attribution: { label: 'Sources' } });
+    expect(enrichment.vertical_reference?.safeParse(undefined).success).toBe(false);
+    expect(getProfileTool.enrichmentTrailer).toEqual({
+      attribution: { label: 'Sources' },
+      vertical_reference: { label: 'Vertical reference' },
+    });
   });
 });
 
 describe('input validation', () => {
+  it.each([2, 5])('rejects antipodal paths before providers with %i samples', async (samples) => {
+    const http = useUpstreams({});
+    const result = await run({
+      path: [
+        { lat: 30, lon: 10 },
+        { lat: 30, lon: 10 },
+        { lat: -30, lon: -170 },
+      ],
+      samples,
+    });
+    const error = expectDeclaredError(
+      getProfileTool,
+      result,
+      'antipodal_path',
+      JsonRpcErrorCode.ValidationError,
+    );
+    expect(error.data).toMatchObject({ start_index: 0, end_index: 2 });
+    expect(contentText(result)).toContain('waypoint');
+    expect(epqsRequestCount(http)).toBe(0);
+    expect(await otdRequests(http)).toHaveLength(0);
+  });
   const parse = (input: unknown) => getProfileTool.input.safeParse(input);
 
   it('defaults samples to 100, include_samples to true, and source to auto', () => {

@@ -167,7 +167,7 @@ describe('input validation', () => {
   it.each([
     ['no points', {}],
     ['an empty list', { points: [] }],
-    ['101 points', { points: Array.from({ length: 101 }, () => SEATTLE) }],
+    ['1001 points', { points: Array.from({ length: 1001 }, () => SEATTLE) }],
     ['points as a string', { points: '47.6,-122.3' }],
     ['points as null', { points: null }],
     ['a tuple', { points: [[47.6, -122.3]] }],
@@ -188,7 +188,7 @@ describe('input validation', () => {
   describe('on the wire', () => {
     it.each([
       ['an empty list', { points: [] }, 'points'],
-      ['101 points', { points: Array.from({ length: 101 }, () => SEATTLE) }, 'points'],
+      ['1001 points', { points: Array.from({ length: 1001 }, () => SEATTLE) }, 'points'],
       ['out-of-range latitude', { points: [{ lat: 91, lon: 0 }] }, 'points.0.lat'],
       ['a misspelled key', { points: [{ lat: 1, lan: 2 }] }, 'points.0.lon'],
       ['a bad source', { points: [SEATTLE], source: 'srtm' }, 'source'],
@@ -225,7 +225,7 @@ describe('input validation', () => {
     expect(result.error?.issues[0]).toMatchObject({
       code: 'too_big',
       origin: 'array',
-      maximum: 100,
+      maximum: 1000,
       path: ['points'],
     });
   });
@@ -820,6 +820,10 @@ describe('implausible upstream elevations', () => {
 describe('format()', () => {
   const fullOutput = () =>
     getPointsTool.output.parse({
+      requested_points: 3,
+      processed_points: 3,
+      remaining_points: 0,
+      next_offset: null,
       points: [
         {
           lat: 47.6062,
@@ -881,6 +885,7 @@ describe('format()', () => {
     useUpstreams({ epqs: () => epqsResponse(epqsHitBody()) });
     const result = await run({ points: [SEATTLE] });
     const output = getPointsTool.output.parse({
+      ...structured(result),
       points: structured(result).points,
       points_with_data: structured(result).points_with_data,
       source_mode: structured(result).source_mode,

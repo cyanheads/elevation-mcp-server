@@ -203,6 +203,7 @@ describe('UsgsEpqsClient 200 classification', () => {
       ['call failed', EPQS_MISS_TEXTS.callFailed],
       ['transformation unavailable', EPQS_MISS_TEXTS.transformationUnavailable],
       ['empty geometry', EPQS_MISS_TEXTS.emptyGeometry],
+      ['table not found', EPQS_MISS_TEXTS.tableNotFound],
       ['spatialReference invalid', EPQS_MISS_SPATIAL_REFERENCE],
     ])('treats the plain-text body "%s" as a miss, not an error', async (_name, text) => {
       const { client, http } = setup(() => epqsResponse(text));

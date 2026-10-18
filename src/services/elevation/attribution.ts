@@ -52,3 +52,25 @@ export function attributionFor(values: Iterable<{ dataset?: Dataset | undefined 
   );
   return lines.length > 0 ? lines.join('\n') : NO_DATASET_ATTRIBUTION;
 }
+
+/** Height-reference context for answering datasets; dataset aliases never establish a custom raster's datum. */
+export function verticalReferenceFor(
+  values: Iterable<{ dataset?: Dataset | undefined } | null>,
+  publicOpenTopoData: boolean,
+): string {
+  const answered = new Set(Array.from(values, (value) => value?.dataset));
+  const lines = DATASETS.filter((dataset) => answered.has(dataset)).map((dataset) => {
+    if (dataset === 'usgs_3dep')
+      return 'usgs_3dep: NAVD88 is typical in the conterminous US; the exact returned raster reference is unverified and can vary elsewhere.';
+    if (!publicOpenTopoData)
+      return `${dataset}: self-hosted Open Topo Data height reference is unverified (unknown/variable); dataset names do not establish the raster datum.`;
+    return dataset === 'srtm30m'
+      ? 'srtm30m: public SRTM heights use EGM96.'
+      : 'mapzen: height reference is unknown/variable across its source rasters.';
+  });
+  if (lines.length === 0)
+    return 'No height reference was established because no dataset returned elevation data. Heights are returned without transformation.';
+  if (lines.length > 1) lines.push('Mixed datasets are not normalized to a common vertical datum.');
+  lines.push('Heights are returned without transformation.');
+  return lines.join(' ');
+}
