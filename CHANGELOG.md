@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.0](changelog/0.3.x/0.3.0.md) — 2026-10-28
+
+Publish the elevation-guide skill for terrain workflows, declare stateless HTTP by default, and adopt mcp-ts-core 0.13.18 with updated plugin and desktop-bundle packaging.
+
 ## [0.2.0](changelog/0.2.x/0.2.0.md) — 2026-10-17 · ⚠️ Breaking
 
 Terrain sampling and provider reliability

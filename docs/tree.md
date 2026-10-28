@@ -1,6 +1,6 @@
 # elevation-mcp-server - Directory Structure
 
-Generated on: 2026-10-28 13:31:30
+Generated on: 2026-10-28 13:52:22
 
 ```text
 elevation-mcp-server/
@@ -26,6 +26,7 @@ elevation-mcp-server/
 ├── changelog/
 │   ├── 0.1.x/
 │   ├── 0.2.x/
+│   ├── 0.3.x/
 │   └── template.md
 ├── docs/
 │   └── design.md
