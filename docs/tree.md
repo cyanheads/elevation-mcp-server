@@ -1,6 +1,6 @@
 # elevation-mcp-server - Directory Structure
 
-Generated on: 2026-10-18 05:55:07
+Generated on: 2026-10-28 13:31:30
 
 ```text
 elevation-mcp-server/
@@ -37,6 +37,8 @@ elevation-mcp-server/
 │   ├── add-resource/
 │   │   └── SKILL.md
 │   ├── add-service/
+│   │   └── SKILL.md
+│   ├── add-skill/
 │   │   └── SKILL.md
 │   ├── add-test/
 │   │   └── SKILL.md
@@ -134,6 +136,9 @@ elevation-mcp-server/
 │   ├── prune-musl-packages.ts
 │   ├── release-github.ts
 │   └── tree.ts
+├── skills/
+│   └── elevation-guide/
+│       └── SKILL.md
 ├── src/
 │   ├── config/
 │   │   └── server-config.ts
@@ -174,6 +179,8 @@ elevation-mcp-server/
 │   │   ├── harness.ts
 │   │   ├── opentopodata.ts
 │   │   └── tool-harness.ts
+│   ├── scripts/
+│   │   └── bundle-entries.test.ts
 │   ├── services/
 │   │   ├── antipodal.test.ts
 │   │   ├── attribution.test.ts
@@ -210,7 +217,9 @@ elevation-mcp-server/
 ├── Dockerfile
 ├── LICENSE
 ├── manifest.json
+├── mcp.json
 ├── package.json
+├── plugin.json
 ├── README.md
 ├── server.json
 ├── tsconfig.build.json

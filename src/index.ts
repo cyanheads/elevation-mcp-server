@@ -34,7 +34,9 @@ let providerTransport: ProviderTransport | undefined;
 await createApp({
   name: 'elevation-mcp-server',
   title: 'elevation-mcp-server',
+  sessionMode: 'stateless',
   tools: allToolDefinitions,
+  skills: 'skills',
   instructions: buildServerInstructions(config),
   async setup() {
     providerTransport = await createProviderTransport();

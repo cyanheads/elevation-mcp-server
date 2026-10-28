@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.2.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/elevation-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.3.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/elevation-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/elevation-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.3-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.2.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/elevation-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.4.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/elevation-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/elevation-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.4-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -39,6 +39,10 @@ Elevation and terrain analysis anywhere on Earth, from USGS 3DEP (1–30 m acros
 | `elevation_get_profile` | Sample a route at evenly spaced points and summarize distance, ascent, descent, elevation range, and steepest grades |
 | `elevation_get_grid` | Sample a node grid over a bounding box and report its highest and lowest points, mean elevation, and relief |
 | `elevation_check_line_of_sight` | Decide whether terrain blocks the sightline between two points, with earth curvature and refraction, and check first Fresnel zone clearance for radio links |
+
+### Agent skill
+
+The [elevation-guide](./skills/elevation-guide/SKILL.md) covers route geometry, candidate high-point refinement, and visual or radio sightline assessment. Plugin installs discover it in root `skills/`; npm, Docker, and MCPB distributions include it. MCP clients can read `skill://elevation-guide/SKILL.md` as a resource or use the Skills extension.
 
 ## Capability reference
 
@@ -110,114 +114,32 @@ Agent-friendly output:
 
 ## Getting started
 
-### Public Hosted Instance
+Connect to the public instance:
 
-A public instance is available at `https://elevation.caseyjhand.com/mcp` — no installation required. Point any MCP client at it via Streamable HTTP:
-
-```json
-{
-  "mcpServers": {
-    "elevation-mcp-server": {
-      "type": "streamable-http",
-      "url": "https://elevation.caseyjhand.com/mcp"
-    }
-  }
-}
+```sh
+claude mcp add --transport http elevation-mcp-server https://elevation.caseyjhand.com/mcp
 ```
 
-Every caller of the hosted instance shares one Open Topo Data allowance of 1,000 requests a day. Under the default `auto` source it goes to the points USGS 3DEP doesn't answer; 3DEP covers the US and its territories, plus much of Canada and Mexico. For sustained use, run your own instance.
+Every hosted caller shares one Open Topo Data allowance of 1,000 requests a day. Under `auto`, 3DEP answers inside its coverage and Open Topo Data handles the rest. For sustained global use, run your own instance:
 
-### Self-Hosted / Local
-
-Add the following to your MCP client configuration file.
-
-```json
-{
-  "mcpServers": {
-    "elevation-mcp-server": {
-      "type": "stdio",
-      "command": "bunx",
-      "args": ["@cyanheads/elevation-mcp-server@latest"],
-      "env": {
-        "MCP_TRANSPORT_TYPE": "stdio",
-        "MCP_LOG_LEVEL": "info"
-      }
-    }
-  }
-}
+```sh
+claude mcp add elevation-mcp-server -- npx -y @cyanheads/elevation-mcp-server
 ```
 
-Or with npx (no Bun required):
+Other MCP clients use this local configuration:
 
 ```json
 {
   "mcpServers": {
     "elevation-mcp-server": {
-      "type": "stdio",
       "command": "npx",
-      "args": ["-y", "@cyanheads/elevation-mcp-server@latest"],
-      "env": {
-        "MCP_TRANSPORT_TYPE": "stdio",
-        "MCP_LOG_LEVEL": "info"
-      }
+      "args": ["-y", "@cyanheads/elevation-mcp-server"]
     }
   }
 }
 ```
 
-Or with Docker:
-
-```json
-{
-  "mcpServers": {
-    "elevation-mcp-server": {
-      "type": "stdio",
-      "command": "docker",
-      "args": ["run", "-i", "--rm", "-e", "MCP_TRANSPORT_TYPE=stdio", "ghcr.io/cyanheads/elevation-mcp-server:latest"]
-    }
-  }
-}
-```
-
-For Streamable HTTP, set the transport and start the server:
-
-```sh
-MCP_TRANSPORT_TYPE=http MCP_HTTP_PORT=3010 bun run start:http
-# Server listens at http://localhost:3010/mcp
-```
-
-### Prerequisites
-
-- [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+).
-- No API key: USGS 3DEP and Open Topo Data are both keyless.
-- Optional: a self-hosted [Open Topo Data](https://www.opentopodata.org/) instance with the `srtm30m` and `mapzen` datasets, for heavy or hosted use (see [Configuration](#configuration)).
-
-### Installation
-
-1. **Clone the repository:**
-
-```sh
-git clone https://github.com/cyanheads/elevation-mcp-server.git
-```
-
-2. **Navigate into the directory:**
-
-```sh
-cd elevation-mcp-server
-```
-
-3. **Install dependencies:**
-
-```sh
-bun install
-```
-
-4. **Configure environment:**
-
-```sh
-cp .env.example .env
-# optionally set OPENTOPODATA_BASE_URL to a self-hosted Open Topo Data instance
-```
+See [Running the server](#running-the-server) for source and Docker setup.
 
 ## Configuration
 
@@ -226,7 +148,7 @@ cp .env.example .env
 | `OPENTOPODATA_BASE_URL` | Open Topo Data instance used outside USGS 3DEP coverage, as an `http` or `https` URL. Unset or blank means the public instance; any other URL is treated as a self-hosted instance. | `https://api.opentopodata.org` |
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |
 | `MCP_HTTP_PORT` | HTTP server port. | `3010` |
-| `MCP_SESSION_MODE` | HTTP session mode: `stateless`, `stateful`, or `auto`. `.env.example` and the Docker image set `stateless`. | `auto` |
+| `MCP_SESSION_MODE` | HTTP session mode: `stateless`, `stateful`, or `auto`. Overrides the stateless application default. | `stateless` |
 | `MCP_AUTH_MODE` | Authentication: `none`, `jwt`, or `oauth`. Under `jwt` or `oauth`, each tool requires the scope `tool:<tool_name>:read`. | `none` |
 | `MCP_LOG_LEVEL` | Log level (`debug`, `info`, `warning`, `error`, etc.). | `info` |
 | `LOGS_DIR` | Directory for log files (Node.js only). | `<app-root>/logs` |
@@ -251,6 +173,28 @@ See [`.env.example`](./.env.example) for every server setting and the common fra
 - **Line of sight** is limited to 1,000 km, where the parabolic curvature approximation overstates the midpoint rise by up to about 10 m. Its Fresnel check covers the first zone against the 60% bar at the chosen earth model, at the sample positions only, with no diffraction loss or worst-case k factor.
 
 ## Running the server
+
+Requires Bun 1.4.0+ or Node.js 24+. Both elevation providers are keyless. For heavy global use, set `OPENTOPODATA_BASE_URL` to a self-hosted Open Topo Data instance with `srtm30m`, `mapzen`, and at least 100 locations per request.
+
+```sh
+git clone https://github.com/cyanheads/elevation-mcp-server.git
+cd elevation-mcp-server
+bun install
+cp .env.example .env
+```
+
+For Docker over stdio:
+
+```sh
+docker run -i --rm -e MCP_TRANSPORT_TYPE=stdio ghcr.io/cyanheads/elevation-mcp-server:latest
+```
+
+For HTTP from source:
+
+```sh
+MCP_TRANSPORT_TYPE=http MCP_HTTP_PORT=3010 bun run start:http
+# http://localhost:3010/mcp
+```
 
 ### Local development
 
@@ -285,6 +229,7 @@ See [`.env.example`](./.env.example) for every server setting and the common fra
 | `src/services/opentopodata` | Open Topo Data client and its request pacers. |
 | `src/services/shared` | Timed fetch attempts and bounded body reads shared by both clients. |
 | `docs/design.md` | Design: tool contracts, computation, services, decisions, and limitations. |
+| `skills/elevation-guide/` | Published workflow and interpretation gates for agents calling the terrain tools. |
 | `tests/` | Unit and tool tests against a mocked upstream. |
 
 ## Development guide
@@ -324,12 +269,7 @@ This server is independent of the U.S. Geological Survey and of Open Topo Data, 
 
 ## Contributing
 
-Issues are welcome. Run checks and tests before submitting:
-
-```sh
-bun run devcheck
-bun run test
-```
+Issues are welcome at the [issue tracker](https://github.com/cyanheads/elevation-mcp-server/issues).
 
 ## License
 

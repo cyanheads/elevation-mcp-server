@@ -528,7 +528,7 @@ Built at startup from config: the last sentence (public-instance limits) is incl
 8. **`elevation_check_line_of_sight`**.
 9. **`elevation_get_grid`**.
 
-No resources or prompts. Each step is testable on its own; steps 6–9 each add a contract test per declared reason and one asserting `attribution` on every success path.
+No terrain-record resources or prompts. The published elevation-guide is served as a skill resource through `createApp({ skills: 'skills' })`. Each step is testable on its own; steps 6–9 each add a contract test per declared reason and one asserting `attribution` on every success path.
 
 ## Workflow Analysis
 
@@ -564,7 +564,7 @@ A typical cross-tool chain: resolve a trailhead and a summit to coordinates (any
 11. **Per-sample feet omitted from profile samples and grid cells.** A 250-sample profile carrying both units roughly doubles its payload. Summaries, extremes, clearances, and point lookups carry both units.
 12. **Rounding** to 2 decimals (m), 1 decimal (ft); EPQS's 9 decimals are false precision.
 13. **No reference tool.** The vocabulary is three source modes, three dataset ids, and four earth models, carried by enums, parameter descriptions, and the server instructions. Recovery strings route to concrete calls (`elevation_get_points` on one point, a re-call with another `source`), so a reference tool would add selection load without unlocking anything.
-14. **No resources or prompts.** Nothing is a stable addressable record; the workflows are single tool calls.
+14. **A skill resource, no terrain-record resources or prompts.** Terrain results are computed per call rather than stored as addressable records. `skills/elevation-guide/SKILL.md` supplies gates for route geometry, local high-point refinement, and sightline interpretation across calls; the framework serves it at `skill://elevation-guide/SKILL.md` and through the Skills extension.
 15. **Sample count, not interval, is the sampling knob.** Count is what drives upstream cost and latency; the resulting interval is echoed, and notices flag spacing that is too coarse or finer than the source.
 16. **No smoothing or hysteresis on ascent and descent.** Any threshold is an arbitrary parameter that changes the totals; raw sums over the reported samples are reproducible, and spacing is disclosed.
 17. **Nested point objects strip unknown keys** so points carried over from other tools' outputs are accepted; `lat`/`lon` stay required.
