@@ -534,7 +534,7 @@ describe('include_samples: false', () => {
     expect(text).toContain(summaryOf(contentText(full.result)));
     const { notice, attribution } = structured(lean.result);
     expect(text).toContain(`> ${notice}`);
-    expect(text).toContain(`**Sources:** ${attribution}`);
+    expect(text).toContain(`**Sources:** \n\`\`\`\n${attribution}\n\`\`\``);
   });
 });
 
@@ -1198,7 +1198,7 @@ describe('format()', () => {
     const text = contentText(result);
     expect(text.startsWith(textOf(getProfileTool.output.parse(rest)))).toBe(true);
     expect(text).toContain(`> ${notice}`);
-    expect(text).toContain(`**Sources:** ${attribution}`);
+    expect(text).toContain(`**Sources:** \n\`\`\`\n${attribution}\n\`\`\``);
   });
 
   it('carries every structuredContent value in content[] for a live partial result', async () => {

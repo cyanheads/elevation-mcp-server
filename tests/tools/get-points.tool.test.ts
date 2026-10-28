@@ -891,7 +891,7 @@ describe('format()', () => {
       source_mode: structured(result).source_mode,
     });
     expect(contentText(result).startsWith(textOf(output))).toBe(true);
-    expect(contentText(result)).toContain(`**Sources:** ${structured(result).attribution}`);
+    expect(contentText(result)).toContain(`**Sources:** \`${structured(result).attribution}\``);
   });
 
   it('carries the same data in content[] as in structuredContent for a live result', async () => {
