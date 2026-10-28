@@ -1,0 +1,36 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "elevation-mcp-server",
+  "version": "0.2.0",
+  "description": "Look up elevation worldwide, profile route ascent/descent, grid areas, check terrain line of sight via MCP. STDIO or Streamable HTTP.",
+  "author": {
+    "name": "Casey Hand",
+    "email": "casey@caseyjhand.com",
+    "url": "https://caseyjhand.com"
+  },
+  "homepage": "https://github.com/cyanheads/elevation-mcp-server#readme",
+  "repository": "https://github.com/cyanheads/elevation-mcp-server",
+  "license": "Apache-2.0",
+  "keywords": [
+    "ai-agents",
+    "ai-tools",
+    "cyanheads",
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "typescript",
+    "bun",
+    "stdio",
+    "streamable-http",
+    "elevation",
+    "terrain",
+    "topography",
+    "dem",
+    "geospatial",
+    "usgs-3dep",
+    "srtm",
+    "opentopodata",
+    "elevation-profile",
+    "line-of-sight"
+  ]
+}

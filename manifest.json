@@ -2,16 +2,27 @@
   "manifest_version": "0.3",
   "name": "elevation-mcp-server",
   "version": "0.2.0",
-  "description": "Look up elevation worldwide, profile route ascent/descent, grid areas, check terrain line of sight.",
-  "author": { "name": "cyanheads" },
-  "repository": { "type": "git", "url": "https://github.com/cyanheads/elevation-mcp-server" },
+  "description": "Look up elevation worldwide, profile route ascent/descent, grid areas, check terrain line of sight via MCP. STDIO or Streamable HTTP.",
+  "author": {
+    "name": "cyanheads"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cyanheads/elevation-mcp-server"
+  },
   "homepage": "https://github.com/cyanheads/elevation-mcp-server#readme",
   "license": "Apache-2.0",
   "keywords": [
+    "ai-agents",
+    "ai-tools",
+    "cyanheads",
     "mcp",
     "mcp-server",
     "model-context-protocol",
     "typescript",
+    "bun",
+    "stdio",
+    "streamable-http",
     "elevation",
     "terrain",
     "topography",
@@ -38,7 +49,9 @@
     }
   },
   "compatibility": {
-    "runtimes": { "node": ">=24.0.0" }
+    "runtimes": {
+      "node": ">=24.0.0"
+    }
   },
   "tools_generated": true,
   "prompts_generated": false,
