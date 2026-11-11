@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.1](changelog/0.3.x/0.3.1.md) — 2026-11-11
+
+Batch 3DEP sampling for profiles, grids, and sightlines, correct spot elevation acquisition dates, and disclose sample-count and sightline spacing limits.
+
 ## [0.3.0](changelog/0.3.x/0.3.0.md) — 2026-10-28
 
 Publish the elevation-guide skill for terrain workflows, declare stateless HTTP by default, and adopt mcp-ts-core 0.13.18 with updated plugin and desktop-bundle packaging.
