@@ -5,7 +5,7 @@
 
 import type { Context } from '@cyanheads/mcp-ts-core';
 
-/** The dataset that produced an elevation value. `usgs_3dep` comes from EPQS; the other two from Open Topo Data. */
+/** The dataset that produced an elevation value. `usgs_3dep` comes from USGS; the other two from Open Topo Data. */
 export type Dataset = 'usgs_3dep' | 'srtm30m' | 'mapzen';
 
 /** Every dataset id, in attribution order. */

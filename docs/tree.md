@@ -1,6 +1,6 @@
 # elevation-mcp-server - Directory Structure
 
-Generated on: 2026-10-28 13:52:22
+Generated on: 2026-11-11 09:01:21
 
 ```text
 elevation-mcp-server/
@@ -154,7 +154,8 @@ elevation-mcp-server/
 │   │   │   └── shared/
 │   │   │       ├── format.ts
 │   │   │       ├── inputs.ts
-│   │   │       └── outputs.ts
+│   │   │       ├── outputs.ts
+│   │   │       └── sample-count.ts
 │   │   └── server-instructions.ts
 │   ├── services/
 │   │   ├── elevation/
@@ -169,7 +170,9 @@ elevation-mcp-server/
 │   │   │   ├── http-attempt.ts
 │   │   │   └── provider-fetch.ts
 │   │   └── usgs-epqs/
-│   │       └── usgs-epqs-client.ts
+│   │       ├── usgs-epqs-client.ts
+│   │       ├── usgs-image-server.ts
+│   │       └── usgs-value.ts
 │   └── index.ts
 ├── tests/
 │   ├── config/
@@ -179,7 +182,8 @@ elevation-mcp-server/
 │   │   ├── epqs.ts
 │   │   ├── harness.ts
 │   │   ├── opentopodata.ts
-│   │   └── tool-harness.ts
+│   │   ├── tool-harness.ts
+│   │   └── usgs-image-server.ts
 │   ├── scripts/
 │   │   └── bundle-entries.test.ts
 │   ├── services/

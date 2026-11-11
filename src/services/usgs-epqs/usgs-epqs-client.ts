@@ -14,13 +14,7 @@ import {
   type Pacer,
   withRetry,
 } from '@cyanheads/mcp-ts-core/utils';
-import type {
-  ElevationValue,
-  LatLon,
-  ProviderCallOptions,
-  ProviderLookup,
-} from '@/services/elevation/types.js';
-import { isPlausibleElevation, METERS_PER_DEGREE, roundTo } from '@/services/elevation/units.js';
+import type { LatLon, ProviderCallOptions, ProviderLookup } from '@/services/elevation/types.js';
 import {
   discardBody,
   logUpstreamText,
@@ -28,14 +22,13 @@ import {
   runTimedAttempt,
   USER_AGENT,
 } from '@/services/shared/http-attempt.js';
+import { readUsgsValue } from './usgs-value.js';
 
 const EPQS_URL = 'https://epqs.nationalmap.gov/v1/json';
 const SERVICE = 'USGS EPQS';
 const ATTEMPT_TIMEOUT_MS = 10_000;
 /** Largest observed body is 240 bytes. */
 const MAX_BODY_BYTES = 16 * 1024;
-/** The `M/D/YYYY` form EPQS writes acquisition dates in; live values include a zero month or day. */
-const ACQUISITION_DATE_FORM = /^\d{1,2}\/\d{1,2}\/\d{4}$/;
 
 /** EPQS requests the production pacer keeps in flight, across every call. */
 export const EPQS_MAX_CONCURRENT = 6;
@@ -134,7 +127,7 @@ export class UsgsEpqsClient {
       y: point.lat.toFixed(6),
       wkid: '4326',
       units: 'Meters',
-      includeDate: 'true',
+      includeDate: 'false',
     }).toString();
     const fetchImpl = this.#fetch;
 
@@ -166,8 +159,7 @@ export class UsgsEpqsClient {
  * number or numeric string within the plausibility floor and ceiling; anything
  * else (EPQS's plain-text miss bodies, the no-data sentinel, an implausible
  * value, a body over the read ceiling) is a miss. Miss text is never returned,
- * and reaches only the process log. A hit keeps its acquisition date only in
- * `M/D/YYYY` form.
+ * and reaches only the process log. Dates come from the raster catalog.
  */
 function classifyEpqsBody(body: string | undefined, point: LatLon, ctx: Context): ProviderLookup {
   if (body === undefined) {
@@ -189,40 +181,8 @@ function classifyEpqsBody(body: string | undefined, point: LatLon, ctx: Context)
   };
   const parsed = parseJsonObject(body);
   if (parsed === undefined) return miss('not_a_json_object');
-  const elevation = readNumeric(parsed.value);
-  if (elevation === undefined) return miss('no_numeric_value');
-  if (!isPlausibleElevation(elevation)) return miss('outside_plausible_range');
-
-  const resolution =
-    typeof parsed.resolution === 'number' ? normalizeResolution(parsed.resolution) : undefined;
-  const rasterId = parsed.rasterId;
-  const attributes = parsed.attributes;
-  const acquisitionDate =
-    attributes !== null && typeof attributes === 'object' && 'AcquisitionDate' in attributes
-      ? attributes.AcquisitionDate
-      : undefined;
-
-  const value: ElevationValue = {
-    dataset: 'usgs_3dep',
-    elevation_m: elevation,
-    ...(resolution !== undefined && { resolution_m: resolution }),
-    ...(typeof rasterId === 'number' && Number.isInteger(rasterId) && { raster_id: rasterId }),
-    ...(typeof acquisitionDate === 'string' &&
-      ACQUISITION_DATE_FORM.test(acquisitionDate) && { acquisition_date: acquisitionDate }),
-  };
-  return { kind: 'hit', value };
-}
-
-/**
- * EPQS reports `resolution` in the raster's native unit: meters for projected
- * lidar rasters (observed 1, 5), degrees for the arc-second seamless rasters.
- * Between the two bands the unit is unknown, so the figure is omitted.
- */
-function normalizeResolution(resolution: number): number | undefined {
-  if (!Number.isFinite(resolution) || resolution <= 0) return;
-  if (resolution >= 0.5) return roundTo(resolution, 1);
-  if (resolution < 0.01) return roundTo(resolution * METERS_PER_DEGREE, 1);
-  return;
+  const result = readUsgsValue(parsed);
+  return result.kind === 'hit' ? result : miss(result.kind);
 }
 
 function parseJsonObject(text: string): Record<string, unknown> | undefined {
@@ -234,14 +194,6 @@ function parseJsonObject(text: string): Record<string, unknown> | undefined {
   } catch {
     return;
   }
-}
-
-/** A finite number, or a non-blank string that parses to one. */
-function readNumeric(value: unknown): number | undefined {
-  if (typeof value === 'number') return Number.isFinite(value) ? value : undefined;
-  if (typeof value !== 'string' || value.trim() === '') return;
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : undefined;
 }
 
 /**

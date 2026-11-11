@@ -2,8 +2,8 @@
 
 **Server:** elevation-mcp-server
 **Version:** 0.3.0
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.18`
-**Engines:** Bun ≥1.4.0, Node ≥24.0.0
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.22`
+**Engines:** Bun ≥1.4.4, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/server` ^2.4.0
 **Zod:** ^4.6.7
 
@@ -114,11 +114,11 @@ export const getPointsTool = tool('elevation_get_points', {
 
 Conventions this surface holds to, and that a new tool inherits:
 
-- **Every elevation comes from `ElevationSampler`.** Tools never call a provider client. `getElevationSampler().sample(points, source, ctx)` owns routing, the 3DEP coverage envelope, dedupe, admission against the 3DEP lookups other calls have queued, the per-call window of 6 outstanding 3DEP lookups, chunking at 100, the 45 s budget, and error normalization. A coverage miss comes back as a sample without data; a provider failure rejects with one of the six service reasons.
-- **Shared inputs live in `tools/shared/inputs.ts`.** `PointSchema` for every coordinate, `SourceSchema` on every tool, `blankAsUnset` around every optional numeric, boolean, and enum input so a form client's blank reaches the default, and `boundedArray` for point lists so an oversized paste fails with one `too_big` issue.
+- **Every elevation comes from `ElevationSampler`.** Computed tools call `sample(points, source, ctx, 'computed')` to try 3DEP ImageServer batches first and use EPQS for unanswered positions. Spot heights use EPQS followed by a bounded raster catalog lookup. The sampler owns coverage routing, dedupe, EPQS admission and its 6-lookup window, Open Topo Data chunks of 100, the 45 s budget, and error normalization.
+- **Shared inputs live in `tools/shared/inputs.ts`.** Use `PointSchema` for coordinates, `SourceSchema` for provider selection, `blankAsUnset` for optional scalars, and `boundedArray` for point lists. Mark numeric and boolean fields eligible for repair explicitly. Profile and sightline use `tools/shared/sample-count.ts` to validate and disclose requests served at the 250-sample cap.
 - **Attribution is required enrichment.** Each tool declares `notice` (optional) then `attribution` (required, rendered as the `Sources:` trailer), and writes `attribution` immediately after the sampler resolves, before any `ctx.fail` or notice branch, so every success path carries it. Notice fragments are joined, in the order `docs/design.md` lists them, into one `ctx.enrich.notice()` call.
 - **Error contracts are inline per tool.** The six service reasons carry `thrownBy: 'service'` and a recovery naming the tool itself; handler reasons (`degenerate_path`, `no_coverage`, `invalid_bbox`, `too_many_cells`, `same_endpoints`, `sightline_too_long`, `endpoint_no_data`) go through `ctx.fail`.
-- **Absent stays absent.** A point or sample without data omits `elevation_m`, `dataset`, and `resolution_m`; grid cells use `null` to keep matrix positions. Nothing is coerced to 0. Upstream-authored text reaches output in one field, `acquisition_date`, kept only in `M/D/YYYY` form, and `format()` renders it only through `inlineText()`.
+- **Absent stays absent.** A point or sample without data omits `elevation_m`, `dataset`, and `resolution_m`; grid cells use `null` to keep matrix positions. Spot heights carry a UTC `YYYY-MM-DD` `acquisition_date` when the raster catalog supplies one. Missing dates omit the field and add a notice while preserving the elevation.
 - **Geometry is pure.** `src/services/elevation/geometry.ts` does no I/O and reports degenerate inputs as values (`kind: 'degenerate'`, `kind: 'endpoint_no_data'`) that each tool maps to its own reason.
 - **`docs/design.md` is the spec.** Tool contracts, notice fragments, recovery strings, and the design decisions behind them live there; keep it in step when a contract changes.
 
@@ -137,6 +137,8 @@ import { parseEnvConfig } from '@cyanheads/mcp-ts-core/config';
 export const PUBLIC_OPENTOPODATA_BASE_URL = 'https://api.opentopodata.org';
 
 const ServerConfigSchema = z.object({
+  repairOptionalScalars: z.stringbool().default(true),
+  clampLimits: z.stringbool().default(true),
   openTopoDataBaseUrl: z
     .preprocess(
       (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),
@@ -154,6 +156,8 @@ let _config: ServerConfig | undefined;
 /** Parses the server's env vars once, on first use. */
 export function getServerConfig(): ServerConfig {
   _config ??= parseEnvConfig(ServerConfigSchema, {
+    repairOptionalScalars: 'ELEVATION_REPAIR_OPTIONAL_SCALARS',
+    clampLimits: 'ELEVATION_CLAMP_LIMITS',
     openTopoDataBaseUrl: 'OPENTOPODATA_BASE_URL',
   });
   return _config;
@@ -195,7 +199,7 @@ The instructions are built from config before `createApp()` loads `.env`, so `sr
 
 ### Session posture and shutdown
 
-This server declares `sessionMode: 'stateless'` in `src/index.ts`; no tool asks the caller for input mid-call. A meaningful `MCP_SESSION_MODE` overrides that default; `.env.example` and the Dockerfile also set `stateless`. `setup()` builds both provider clients, their pacers, and the sampler; `teardown()` disposes every pacer.
+This server declares `sessionMode: 'stateless'` in `src/index.ts`; no tool asks the caller for input mid-call. A meaningful `MCP_SESSION_MODE` overrides that default; `.env.example` and the Dockerfile also set `stateless`. `setup()` builds the provider clients, their pacers, and the sampler; `teardown()` disposes every pacer.
 
 ```ts
 await createApp({
@@ -287,6 +291,7 @@ src/
         [tool-name].tool.ts             # One file per elevation_* tool
       shared/
         inputs.ts                       # PointSchema, SourceSchema, blankAsUnset, boundedArray
+        sample-count.ts                 # Profile and sightline request validation and served cap
         outputs.ts                      # DatasetsUsedSchema, ResolutionRangeSchema, provenance summaries
         format.ts                       # inlineText() and count wording for format() and notices
   services/
@@ -298,10 +303,12 @@ src/
       units.ts                          # Earth radius, plausibility floor and ceiling, rounding, meters → feet
     usgs-epqs/
       usgs-epqs-client.ts               # USGS EPQS client and its pacer
+      usgs-image-server.ts              # 3DEP batch sampling and raster catalog dates
+      usgs-value.ts                     # Shared USGS elevation and resolution decoding
     opentopodata/
       opentopodata-client.ts            # Open Topo Data client, request pacer, daily pacer
     shared/
-      http-attempt.ts                   # Timed fetch attempt, bounded body read, and upstream-text logging for both clients
+      http-attempt.ts                   # Timed fetch attempt, bounded body read, and upstream-text logging
       provider-fetch.ts                 # Provider transport lifecycle and Node-compatible fetch dispatcher
 ```
 
@@ -405,7 +412,7 @@ When you complete a skill's checklist, check the boxes and add a completion time
 
 ## Bundling
 
-`npm run bundle` produces a `.mcpb` extension bundle for one-click install in Claude Desktop. `mcpb pack` reads `.mcpbignore`, not `.gitignore`, so every root path the bundle must not ship — source, tests, docs, caches, logs, agent docs, plugin manifests, gitignored local files — needs a root-anchored line there (`/docs/`, never `docs/`, which also strips `node_modules/*/docs/`); `lint:packaging` names each missing or unanchored line. Root `skills/` ships on purpose. The pack step is followed by `scripts/clean-mcpb.ts`, which prunes dev dependencies (`mcpb clean`) and strips four classes of `node_modules/**` content that root-anchored `.mcpbignore` patterns cannot reach: dependency-shipped agent docs (`framework-skills/`, `skills/`, `.claude/`, `.agents/`, `SKILL.md`); platform-specific native bindings, which would otherwise lock the bundle to the platform it was packed on; node-gyp build output beside a `binding.gyp` (`config.gypi`, Makefiles, `obj.target/`, `.deps/`, object files and debug symbols), which records the packing machine's paths — compiled `*.node` addons stay; and build-only package files — the framework's `changelog/`, `scripts/`, `templates/`, `CLAUDE.md`, `AGENTS.md`, and config bases (`biome.json`, `vitest.config.base.mjs`, `config/tsconfig.base.json`), and `better-sqlite3`'s `deps/` and `src/` C sources. A server using DataCanvas therefore ships a portable bundle without the DuckDB native — `@duckdb/node-api` is an optional peer loaded lazily, so canvas tools report an actionable install hint and every other tool works normally. MCPB is stdio-only — HTTP and Cloudflare Workers deployments are unaffected. Consumers who don't need it can delete `manifest.json` and `.mcpbignore`; `lint:packaging` skips cleanly.
+`npm run bundle` produces a `.mcpb` extension bundle for one-click install in Claude Desktop. `mcpb pack` reads `.mcpbignore`, not `.gitignore`, so every root path the bundle must not ship — source, tests, docs, caches, logs, agent docs, plugin manifests, gitignored local files — needs a root-anchored line there (`/docs/`, never `docs/`, which also strips `node_modules/*/docs/`); `lint:packaging` names each missing or unanchored line. Root `skills/` ships on purpose. The pack step is followed by `scripts/clean-mcpb.ts`, which prunes dev dependencies (`mcpb clean`) and strips four classes of `node_modules/**` content that root-anchored `.mcpbignore` patterns cannot reach: dependency-shipped agent docs at each package root (`framework-skills/`, `skills/`, `.claude/`, `.agents/`, `AGENTS.md`, and `CLAUDE.md`) and `SKILL.md` files anywhere (nested runtime modules such as the SDK's `dist/ext/skills/` stay in the bundle); platform-specific native bindings, which would otherwise lock the bundle to the platform it was packed on; node-gyp build output beside a `binding.gyp` (`config.gypi`, Makefiles, `obj.target/`, `.deps/`, object files and debug symbols), which records the packing machine's paths — compiled `*.node` addons stay; and build-only package files — the framework's `changelog/`, `scripts/`, `templates/`, and config bases (`biome.json`, `vitest.config.base.mjs`, `config/tsconfig.base.json`), and `better-sqlite3`'s `deps/` and `src/` C sources. A server using DataCanvas therefore ships a portable bundle without the DuckDB native — `@duckdb/node-api` is an optional peer loaded lazily, so canvas tools report an actionable install hint and every other tool works normally. MCPB is stdio-only — HTTP and Cloudflare Workers deployments are unaffected. Consumers who don't need it can delete `manifest.json` and `.mcpbignore`; `lint:packaging` skips cleanly.
 
 **Adding an env var requires both files:** `server.json` (registry discovery, `environmentVariables[]`) and `manifest.json` (bundle install UX, `mcp_config.env` + `user_config`). `lint:packaging` (run by `devcheck`) verifies the env var names match, that every `user_config` option is wired into `mcp_config.env` as `"X": "${user_config.X}"` (the host substitutes nothing else — `"${X}"` reaches the server as that literal string), and that an optional string option carries `"default": ""`.
 

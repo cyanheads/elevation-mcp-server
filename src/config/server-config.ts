@@ -1,5 +1,5 @@
 /**
- * @fileoverview Server-specific configuration: the Open Topo Data base URL.
+ * @fileoverview Server-specific configuration for upstream access and argument handling.
  * @module config/server-config
  */
 
@@ -10,6 +10,8 @@ import { parseEnvConfig } from '@cyanheads/mcp-ts-core/config';
 export const PUBLIC_OPENTOPODATA_BASE_URL = 'https://api.opentopodata.org';
 
 const ServerConfigSchema = z.object({
+  repairOptionalScalars: z.stringbool().default(true),
+  clampLimits: z.stringbool().default(true),
   openTopoDataBaseUrl: z
     .preprocess(
       (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),
@@ -27,6 +29,8 @@ let _config: ServerConfig | undefined;
 /** Parses the server's env vars once, on first use. */
 export function getServerConfig(): ServerConfig {
   _config ??= parseEnvConfig(ServerConfigSchema, {
+    repairOptionalScalars: 'ELEVATION_REPAIR_OPTIONAL_SCALARS',
+    clampLimits: 'ELEVATION_CLAMP_LIMITS',
     openTopoDataBaseUrl: 'OPENTOPODATA_BASE_URL',
   });
   return _config;

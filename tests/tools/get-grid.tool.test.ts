@@ -18,11 +18,13 @@ import { epqsByPoint, otdByPoint } from '../fixtures/harness.js';
 import type { OtdAnswer } from '../fixtures/opentopodata.js';
 import {
   at,
+  catalogRequestCount,
   contentText,
   epqsAnswers,
   epqsRequestCount,
   errorOf,
   expectDeclaredError,
+  imageSampleRequestCount,
   leafStrings,
   mapzen,
   otdAnswers,
@@ -165,7 +167,7 @@ describe('input validation', () => {
     ['cols 1', { ...BOX, cols: 1 }],
     ['cols 26', { ...BOX, cols: 26 }],
     ['fractional rows', { ...BOX, rows: 2.5 }],
-    ['rows as a numeric string', { ...BOX, rows: '5' }],
+    ['rows as a noncanonical string', { ...BOX, rows: '05' }],
     ['rows null', { ...BOX, rows: null }],
     ['an unknown source', { ...BOX, source: 'srtm' }],
     ['a bbox array', { bbox: [0, 0, 1, 1] }],
@@ -371,7 +373,9 @@ describe('success results', () => {
     ]);
     expect(out.datasets_used).toEqual({ usgs_3dep: 1, srtm30m: 0, mapzen: 0 });
     expect(await otdRequests(http)).toHaveLength(0);
-    expect(epqsRequestCount(http)).toBe(4);
+    expect(imageSampleRequestCount(http)).toBe(1);
+    expect(epqsRequestCount(http)).toBe(3);
+    expect(catalogRequestCount(http)).toBe(0);
   });
 
   describe('a box on the 3DEP coverage edge', () => {

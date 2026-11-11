@@ -33,8 +33,42 @@ describe('getServerConfig', () => {
   it('defaults to the public instance when the variable is unset', async () => {
     vi.stubEnv(VAR, undefined);
     const { getServerConfig } = await freshConfigModule();
-    expect(getServerConfig()).toEqual({ openTopoDataBaseUrl: PUBLIC });
+    expect(getServerConfig()).toMatchObject({ openTopoDataBaseUrl: PUBLIC });
   });
+
+  it('defaults both argument controls on', async () => {
+    vi.stubEnv('ELEVATION_REPAIR_OPTIONAL_SCALARS', undefined);
+    vi.stubEnv('ELEVATION_CLAMP_LIMITS', undefined);
+    const { getServerConfig } = await freshConfigModule();
+    expect(getServerConfig()).toMatchObject({ repairOptionalScalars: true, clampLimits: true });
+  });
+
+  it('can restore strict argument handling while keeping blank defaults', async () => {
+    vi.stubEnv('ELEVATION_REPAIR_OPTIONAL_SCALARS', 'false');
+    vi.stubEnv('ELEVATION_CLAMP_LIMITS', 'false');
+    await freshConfigModule();
+    const { getProfileTool } = await import('@/mcp-server/tools/definitions/get-profile.tool.js');
+    const path = [
+      { lat: 47, lon: -122 },
+      { lat: 48, lon: -122 },
+    ];
+    expect(getProfileTool.input.safeParse({ path, samples: '20' }).success).toBe(false);
+    expect(getProfileTool.input.safeParse({ path, samples: 250 }).success).toBe(true);
+    expect(getProfileTool.input.safeParse({ path, samples: 251 }).error?.issues[0]).toMatchObject({
+      code: 'too_big',
+      maximum: 250,
+    });
+    expect(getProfileTool.input.parse({ path, samples: '' }).samples).toBe(100);
+  });
+
+  it.each(['ELEVATION_REPAIR_OPTIONAL_SCALARS', 'ELEVATION_CLAMP_LIMITS'])(
+    'rejects invalid boolean config for %s',
+    async (name) => {
+      vi.stubEnv(name, 'maybe');
+      const { getServerConfig } = await freshConfigModule();
+      expect(getServerConfig).toThrow(name);
+    },
+  );
 
   it.each([
     ['an empty string', ''],

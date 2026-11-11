@@ -22,6 +22,20 @@
       "version": "0.3.0",
       "environmentVariables": [
         {
+          "name": "ELEVATION_REPAIR_OPTIONAL_SCALARS",
+          "description": "Set false to require JSON numbers and booleans on optional scalar inputs.",
+          "format": "string",
+          "isRequired": false,
+          "default": "true"
+        },
+        {
+          "name": "ELEVATION_CLAMP_LIMITS",
+          "description": "Set false to reject profile and sightline requests above 250 samples.",
+          "format": "string",
+          "isRequired": false,
+          "default": "true"
+        },
+        {
           "name": "MCP_LOG_LEVEL",
           "description": "Sets the minimum log level for output (e.g., 'debug', 'info', 'warn').",
           "format": "string",
@@ -47,6 +61,20 @@
       "runtimeHint": "npx",
       "version": "0.3.0",
       "environmentVariables": [
+        {
+          "name": "ELEVATION_REPAIR_OPTIONAL_SCALARS",
+          "description": "Set false to require JSON numbers and booleans on optional scalar inputs.",
+          "format": "string",
+          "isRequired": false,
+          "default": "true"
+        },
+        {
+          "name": "ELEVATION_CLAMP_LIMITS",
+          "description": "Set false to reject profile and sightline requests above 250 samples.",
+          "format": "string",
+          "isRequired": false,
+          "default": "true"
+        },
         {
           "name": "MCP_TRANSPORT_TYPE",
           "description": "Selects the HTTP transport.",

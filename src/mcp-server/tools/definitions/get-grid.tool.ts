@@ -46,10 +46,12 @@ const GridPointSchema = z
 
 type GridPoint = z.infer<typeof GridPointSchema>;
 
-const gridDimension = (label: string) =>
-  blankAsUnset(z.number().int().min(2).max(25).default(10)).describe(
-    `Grid ${label}, edges included (2–25, default 10). rows × cols must be at most 250.`,
-  );
+const gridDimension = (field: 'rows' | 'cols', label: string) =>
+  blankAsUnset(z.number().int().min(2).max(25).default(10), {
+    kind: 'number',
+    tool: 'elevation_get_grid',
+    field,
+  }).describe(`Grid ${label}, edges included (2–25, default 10). rows × cols must be at most 250.`);
 
 export const getGridTool = tool('elevation_get_grid', {
   title: 'Get Elevation Grid',
@@ -72,8 +74,8 @@ export const getGridTool = tool('elevation_get_grid', {
       .max(90)
       .describe('Northern edge latitude, decimal degrees. Must be greater than south.'),
     east: z.number().min(-180).max(180).describe('Eastern edge longitude, decimal degrees.'),
-    rows: gridDimension('rows, north to south'),
-    cols: gridDimension('columns, west to east'),
+    rows: gridDimension('rows', 'rows, north to south'),
+    cols: gridDimension('cols', 'columns, west to east'),
     source: SourceSchema,
   }),
   output: z.object({
@@ -223,9 +225,9 @@ export const getGridTool = tool('elevation_get_grid', {
     {
       reason: 'sampling_deadline_exceeded',
       code: JsonRpcErrorCode.Timeout,
-      when: "The call's 45 s sampling budget ran out (a retry deadline, or a wait in either provider's request queue), or the USGS 3DEP lookups other calls had queued, plus this call's, would not drain within the calls' budgets, so it sent none and data.retryAfter gives the seconds until the queued lookups drain.",
+      when: "The call's 45 s sampling budget ran out, or its individual USGS 3DEP lookups could not fit within the remaining budget alongside queued lookups. When data.retryAfter is present, it gives the seconds until the queued lookups drain.",
       recovery:
-        'If the budget ran out waiting on USGS 3DEP, re-call elevation_get_grid with fewer rows or columns, since each 3DEP cell is its own upstream request, or, when the error carries retryAfter (other calls held 3DEP), retry it after that many seconds; if it ran out waiting on Open Topo Data, retry in a minute, or re-call it with source usgs_3dep for a box inside USGS 3DEP coverage.',
+        'If the budget ran out waiting on USGS 3DEP, re-call elevation_get_grid with fewer rows or columns, or retry after the indicated number of seconds when the error carries retryAfter. If it ran out waiting on Open Topo Data, retry in a minute or re-call with source usgs_3dep for a box inside USGS 3DEP coverage.',
       thrownBy: 'service',
     },
   ],
@@ -254,7 +256,7 @@ export const getGridTool = tool('elevation_get_grid', {
     }
 
     const grid = gridNodes({ south, west, north, east }, rows, cols);
-    const sampled = await getElevationSampler().sample(grid.nodes, input.source, ctx);
+    const sampled = await getElevationSampler().sample(grid.nodes, input.source, ctx, 'computed');
     ctx.enrich({
       attribution: attributionFor(sampled),
       vertical_reference: verticalReferenceFor(sampled, getElevationSampler().publicOpenTopoData),

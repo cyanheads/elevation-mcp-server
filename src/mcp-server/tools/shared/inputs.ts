@@ -5,14 +5,53 @@
  */
 
 import { z } from '@cyanheads/mcp-ts-core';
+import { createCounter, logger, requestContextService } from '@cyanheads/mcp-ts-core/utils';
+import { getServerConfig } from '@/config/server-config.js';
 import { SOURCE_MODES, type SourceMode } from '@/services/elevation/types.js';
 
-/**
- * Maps a form client's blank to "unset" before `schema` validates, so an
- * optional field's default applies. `toJSONSchema` emits only `schema`.
- */
-export const blankAsUnset = <T extends z.ZodType>(schema: T) =>
-  z.preprocess((value) => (value === '' ? undefined : value), schema);
+type ScalarField = {
+  kind: 'number' | 'boolean';
+  tool: 'elevation_get_profile' | 'elevation_get_grid' | 'elevation_check_line_of_sight';
+  field: string;
+};
+
+const scalarRewrites = createCounter(
+  'elevation.optional_scalar_rewrites',
+  'Optional scalar argument rewrites during parsing',
+  '{rewrites}',
+);
+
+/** Applies the wrapped default to blank input and repairs explicitly marked scalars. JSON Schema advertises only the wrapped schema. */
+export const blankAsUnset = <T extends z.ZodType>(schema: T, scalar?: ScalarField) =>
+  z.preprocess((value) => {
+    if (value === '') return;
+    if (!scalar || typeof value !== 'string' || !getServerConfig().repairOptionalScalars) {
+      return value;
+    }
+    const text = value.trim();
+    let candidate: number | boolean;
+    if (scalar.kind === 'number') {
+      candidate = Number(text);
+      if (!Number.isFinite(candidate) || String(candidate) !== text || text.includes('e')) {
+        return value;
+      }
+    } else {
+      if (text !== 'true' && text !== 'false') return value;
+      candidate = text === 'true';
+    }
+    if (!schema.safeParse(candidate).success) return value;
+
+    const { tool, field } = scalar;
+    scalarRewrites.add(1, { tool, field });
+    logger.info(
+      'Rewrote optional scalar argument',
+      requestContextService.createRequestContext({
+        operation: tool,
+        additionalContext: { tool, field },
+      }),
+    );
+    return candidate;
+  }, schema);
 
 /**
  * An array of `min`–`max` items. An oversized array fails on its length alone:
@@ -57,7 +96,8 @@ function normalizePointKeys(value: unknown): unknown {
 /**
  * A WGS84 point. Not strict: extra keys carried over from another tool's
  * output (a name, an elevation) are stripped, while `lat`/`lon` stay required.
- * Tuples, "lat,lon" strings, numeric strings, and out-of-range values are rejected.
+ * This schema takes numeric coordinates. MCP tool argument repair also accepts
+ * unambiguous numeric strings for canonical coordinate keys.
  */
 export const PointSchema = z.preprocess(
   normalizePointKeys,

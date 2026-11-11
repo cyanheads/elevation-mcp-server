@@ -17,6 +17,7 @@ import {
   EPQS_STARTS_PER_SECOND,
   UsgsEpqsClient,
 } from '@/services/usgs-epqs/usgs-epqs-client.js';
+import { UsgsImageServer } from '@/services/usgs-epqs/usgs-image-server.js';
 import type { Dataset, ElevationValue, LatLon, Sample, SourceMode } from './types.js';
 import { roundTo } from './units.js';
 
@@ -88,6 +89,7 @@ export interface ElevationSamplerOptions {
   /** Per-call budget in ms; defaults to {@link SAMPLING_BUDGET_MS}. */
   budgetMs?: number;
   epqs: UsgsEpqsClient;
+  imageServer: UsgsImageServer;
   /** Clock for the deadline arithmetic; defaults to `Date.now`. */
   now?: () => number;
   openTopoData: OpenTopoDataClient;
@@ -106,7 +108,7 @@ export interface ElevationSamplerOptions {
  * - `Timeout`, `reason: 'sampling_deadline_exceeded'` when the budget ran out
  *   in a retry ladder or a provider queue (cause chained), with `data.provider`
  *   (`usgs_3dep` or `opentopodata`) naming the phase it ran out in; or, before
- *   any request is sent, when the 3DEP lookups other calls have outstanding
+ *   any EPQS request is sent, when the EPQS lookups other calls have outstanding
  *   plus this call's would not drain by the earliest deadline among them
  *   (`data.provider` `usgs_3dep`, `data.retryAfter` in seconds, no cause);
  * - `InternalError` for an Open Topo Data 400 this server provoked;
@@ -115,6 +117,7 @@ export interface ElevationSamplerOptions {
 export class ElevationSampler {
   readonly #budgetMs: number;
   readonly #epqs: UsgsEpqsClient;
+  readonly #imageServer: UsgsImageServer;
   /** Every call in its 3DEP phase; one sampler serves the whole process. */
   readonly #epqsLoads = new Set<EpqsLoad>();
   readonly #now: () => number;
@@ -122,6 +125,7 @@ export class ElevationSampler {
 
   constructor(options: ElevationSamplerOptions) {
     this.#epqs = options.epqs;
+    this.#imageServer = options.imageServer;
     this.#openTopoData = options.openTopoData;
     this.#now = options.now ?? Date.now;
     this.#budgetMs = options.budgetMs ?? SAMPLING_BUDGET_MS;
@@ -132,7 +136,13 @@ export class ElevationSampler {
     return this.#openTopoData.publicInstance;
   }
 
-  async sample(points: readonly LatLon[], mode: SourceMode, ctx: Context): Promise<Sample[]> {
+  /** Computed calls try batch sampling first. Point calls also look up raster dates. */
+  async sample(
+    points: readonly LatLon[],
+    mode: SourceMode,
+    ctx: Context,
+    purpose: 'points' | 'computed' = 'points',
+  ): Promise<Sample[]> {
     const startedAt = this.#now();
     const deadlineAt = startedAt + this.#budgetMs;
     const remainingMs = () => Math.max(0, deadlineAt - this.#now());
@@ -142,6 +152,7 @@ export class ElevationSampler {
     const signal = AbortSignal.any([ctx.signal, failFast.signal]);
     let waitingOn: Provider = 'usgs_3dep';
     const stats = {
+      imageServerHits: 0,
       epqsHits: 0,
       epqsMisses: 0,
       outsideEnvelope: 0,
@@ -151,22 +162,40 @@ export class ElevationSampler {
 
     try {
       // Phase 1: USGS 3DEP. In auto mode only points inside the envelope are queried.
-      const epqsEntries: Entry[] = [];
+      signal.throwIfAborted();
+      const usgsEntries: Entry[] = [];
       for (const entry of entries) {
         if (mode === 'opentopodata') {
           entry.needsOpenTopoData = true;
         } else if (mode === 'usgs_3dep' || insideCoverageEnvelope(entry.point)) {
-          epqsEntries.push(entry);
+          usgsEntries.push(entry);
         } else {
           stats.outsideEnvelope++;
           entry.needsOpenTopoData = true;
         }
       }
+      if (purpose === 'computed') {
+        const hits = await this.#imageServer.sample(
+          usgsEntries.map((entry) => entry.point),
+          { ctx, signal, budgetMs: remainingMs() },
+        );
+        stats.imageServerHits = hits.size;
+        usgsEntries.forEach((entry, index) => {
+          const hit = hits.get(index);
+          if (hit) entry.answer = hit;
+        });
+      }
+      const epqsEntries = usgsEntries.filter((entry) => !entry.answer);
+      if (epqsEntries.length > 0 && remainingMs() === 0) {
+        throw this.#deadlineExceeded(startedAt, waitingOn);
+      }
       const load = this.#admitEpqsLoad(epqsEntries.length, deadlineAt, startedAt);
       try {
         await forEachWindowed(epqsEntries, EPQS_CALL_WINDOW, async (entry) => {
+          const budgetMs = remainingMs();
+          if (budgetMs === 0) throw this.#deadlineExceeded(startedAt, waitingOn);
           const result = await this.#epqs
-            .lookup(entry.point, { ctx, signal, budgetMs: remainingMs() })
+            .lookup(entry.point, { ctx, signal, budgetMs })
             .finally(() => {
               load.outstanding--;
             });
@@ -203,6 +232,25 @@ export class ElevationSampler {
           }),
         );
       }
+      if (purpose === 'points') {
+        const rasters = new Set<number>();
+        for (const { answer } of entries) {
+          if (answer?.dataset !== 'usgs_3dep') continue;
+          const id = answer.raster_id;
+          if (id !== undefined && Number.isSafeInteger(id) && id > 0) rasters.add(id);
+        }
+        const dates = await this.#imageServer.acquisitionDates(rasters, {
+          ctx,
+          signal,
+          budgetMs: remainingMs(),
+        });
+        for (const { answer } of entries) {
+          if (answer?.dataset !== 'usgs_3dep' || answer.raster_id === undefined) continue;
+          const date = dates.get(answer.raster_id);
+          if (date !== undefined) answer.acquisition_date = date;
+        }
+      }
+      signal.throwIfAborted();
     } catch (error) {
       failFast.abort();
       if (ctx.signal.aborted) throw error;
@@ -252,7 +300,7 @@ export class ElevationSampler {
   #epqsBusy(startedAt: number, lookups: number, queued: number, drainMs: number): McpError {
     const retryAfter = Math.max(1, Math.ceil((queued * EPQS_MS_PER_LOOKUP) / 1_000));
     return timeout(
-      `USGS 3DEP lookups queued by other calls (${queued}) and this call's ${lookups} would take about ${Math.ceil(drainMs / 1_000)} s at ${EPQS_STARTS_PER_SECOND} a second, more than the calls involved have left of their ${this.#budgetMs / 1_000} s sampling budgets, so this call sent none. The queued lookups drain in about ${retryAfter} s.`,
+      `USGS 3DEP (EPQS) lookups queued by other calls (${queued}) and this call's ${lookups} would take about ${Math.ceil(drainMs / 1_000)} s at ${EPQS_STARTS_PER_SECOND} a second, more than the calls involved have left of their ${this.#budgetMs / 1_000} s sampling budgets, so this call sent no EPQS requests. The queued lookups drain in about ${retryAfter} s.`,
       {
         reason: 'sampling_deadline_exceeded',
         budgetMs: this.#budgetMs,
@@ -357,6 +405,7 @@ function countByDataset(entries: readonly Entry[]): Partial<Record<Dataset, numb
 
 interface ElevationServices {
   epqs: UsgsEpqsClient;
+  imageServer: UsgsImageServer;
   openTopoData: OpenTopoDataClient;
   sampler: ElevationSampler;
 }
@@ -364,16 +413,22 @@ interface ElevationServices {
 let _services: ElevationServices | undefined;
 
 /**
- * Builds both provider clients (with their production pacers) and the sampler.
+ * Builds provider clients (with their production pacers) and the sampler.
  * Called from `createApp({ setup })`; `fetch` is the handler-level test seam.
  */
 export function initElevationServices(
-  config: ServerConfig,
+  config: Pick<ServerConfig, 'openTopoDataBaseUrl'>,
   { fetch = globalThis.fetch }: { fetch?: typeof globalThis.fetch } = {},
 ): void {
   const epqs = new UsgsEpqsClient({ fetch });
+  const imageServer = new UsgsImageServer(fetch);
   const openTopoData = new OpenTopoDataClient({ fetch, baseUrl: config.openTopoDataBaseUrl });
-  _services = { epqs, openTopoData, sampler: new ElevationSampler({ epqs, openTopoData }) };
+  _services = {
+    epqs,
+    imageServer,
+    openTopoData,
+    sampler: new ElevationSampler({ epqs, imageServer, openTopoData }),
+  };
 }
 
 /** The sampler built by {@link initElevationServices}. */
@@ -387,6 +442,7 @@ export function getElevationSampler(): ElevationSampler {
 /** Disposes every pacer. Called from `createApp({ teardown })`. */
 export function disposeElevationServices(): void {
   _services?.epqs.dispose();
+  _services?.imageServer.dispose();
   _services?.openTopoData.dispose();
   _services = undefined;
 }

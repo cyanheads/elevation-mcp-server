@@ -16,6 +16,11 @@ import {
   summarizeProvenance,
   VerticalReferenceSchema,
 } from '@/mcp-server/tools/shared/outputs.js';
+import {
+  clampSampleCount,
+  MAX_SAMPLES,
+  sampleCountInput,
+} from '@/mcp-server/tools/shared/sample-count.js';
 import { attributionFor, verticalReferenceFor } from '@/services/elevation/attribution.js';
 import { getElevationSampler } from '@/services/elevation/elevation-sampler.js';
 import {
@@ -38,6 +43,9 @@ import { METERS_PER_FOOT, roundTo } from '@/services/elevation/units.js';
 
 /** Clearance under which a `clear` verdict carries a margin notice, meters. */
 const THIN_MARGIN_M = 2;
+
+const sightlineNumber = <T extends z.ZodType>(schema: T, field: string) =>
+  blankAsUnset(schema, { kind: 'number', tool: 'elevation_check_line_of_sight', field });
 
 /** Blank → unset (so the default applies); otherwise trim and lowercase. */
 function normalizeEarthModel(value: unknown): unknown {
@@ -82,10 +90,16 @@ export const checkLineOfSightTool = tool('elevation_check_line_of_sight', {
   input: z.object({
     observer: PointSchema.describe('Observer location as {lat, lon} in decimal degrees (WGS84).'),
     target: PointSchema.describe('Target location as {lat, lon} in decimal degrees (WGS84).'),
-    observer_height_m: blankAsUnset(z.number().min(0).max(10_000).default(1.7)).describe(
+    observer_height_m: sightlineNumber(
+      z.number().min(0).max(10_000).default(1.7),
+      'observer_height_m',
+    ).describe(
       'Observer eye or antenna height above ground, meters (default 1.7, standing eye height).',
     ),
-    target_height_m: blankAsUnset(z.number().min(0).max(10_000).default(0)).describe(
+    target_height_m: sightlineNumber(
+      z.number().min(0).max(10_000).default(0),
+      'target_height_m',
+    ).describe(
       'Target height above ground, meters (default 0, the ground itself). Set it for a tower, building top, or second antenna.',
     ),
     earth_model: z
@@ -93,13 +107,19 @@ export const checkLineOfSightTool = tool('elevation_check_line_of_sight', {
       .describe(
         'Earth model: flat ignores curvature; geometric applies curvature without refraction; optical applies standard visible-light refraction (coefficient 0.13, default); radio applies the standard 4/3-earth radio refraction (coefficient 0.25).',
       ),
-    samples: blankAsUnset(z.number().int().min(3).max(250).default(100)).describe(
+    samples: sampleCountInput(3, 'elevation_check_line_of_sight').describe(
       'Evenly spaced terrain samples along the line, endpoints included (3–250, default 100). Spacing is reported; a ridge narrower than it can be missed.',
     ),
-    water_surface_m: blankAsUnset(z.number().min(-500).max(9_000).optional()).describe(
+    water_surface_m: sightlineNumber(
+      z.number().min(-500).max(9_000).optional(),
+      'water_surface_m',
+    ).describe(
       "Water level in meters (-500 to 9,000). When set, each sample's surface, endpoints included, is the higher of its elevation and this level, replacing the default that lifts only Mapzen sea-floor values to 0 m. Requires a vertical reference compatible with the sampled terrain; choosing zero or source opentopodata alone does not establish compatibility. No datum conversion is performed.",
     ),
-    frequency_mhz: blankAsUnset(z.number().min(30).max(300_000).optional()).describe(
+    frequency_mhz: sightlineNumber(
+      z.number().min(30).max(300_000).optional(),
+      'frequency_mhz',
+    ).describe(
       'Radio frequency in MHz (30–300,000; 5800 for 5.8 GHz). When set, the result adds first Fresnel zone clearance against the 60% free-space bar; pair it with earth_model radio.',
     ),
     source: SourceSchema,
@@ -187,7 +207,7 @@ export const checkLineOfSightTool = tool('elevation_check_line_of_sight', {
       .string()
       .optional()
       .describe(
-        'Guidance on unconfirmed sightlines, thin clearance margins, a clear line short of 60% first Fresnel zone clearance, lines crossing the USGS 3DEP coverage edge, samples over open water or below water_surface_m, and USGS 3DEP values below 0 m.',
+        'Guidance on clamped counts, coarse sampling, unconfirmed sightlines, thin clearance margins, a clear line short of 60% first Fresnel zone clearance, lines crossing the USGS 3DEP coverage edge, samples over open water or below water_surface_m, and USGS 3DEP values below 0 m.',
       ),
     attribution: z
       .string()
@@ -270,15 +290,20 @@ export const checkLineOfSightTool = tool('elevation_check_line_of_sight', {
     {
       reason: 'sampling_deadline_exceeded',
       code: JsonRpcErrorCode.Timeout,
-      when: "The call's 45 s sampling budget ran out (a retry deadline, or a wait in either provider's request queue), or the USGS 3DEP lookups other calls had queued, plus this call's, would not drain within the calls' budgets, so it sent none and data.retryAfter gives the seconds until the queued lookups drain.",
+      when: "The call's 45 s sampling budget ran out, or its individual USGS 3DEP lookups could not fit within the remaining budget alongside queued lookups. When data.retryAfter is present, it gives the seconds until the queued lookups drain.",
       recovery:
-        'If the budget ran out waiting on USGS 3DEP, re-call elevation_check_line_of_sight with fewer samples, since each 3DEP sample is its own upstream request, or, when the error carries retryAfter (other calls held 3DEP), retry it after that many seconds; if it ran out waiting on Open Topo Data, retry in a minute, or re-call it with source usgs_3dep for a line inside USGS 3DEP coverage.',
+        'If the budget ran out waiting on USGS 3DEP, re-call elevation_check_line_of_sight with fewer samples, or retry after the indicated number of seconds when the error carries retryAfter. If it ran out waiting on Open Topo Data, retry in a minute or re-call with source usgs_3dep for a line inside USGS 3DEP coverage.',
       thrownBy: 'service',
     },
   ],
 
   async handler(input, ctx) {
-    const line = resamplePath([input.observer, input.target], input.samples);
+    const { count, notice: clampNotice } = clampSampleCount(
+      input.samples,
+      'elevation_check_line_of_sight',
+      ctx,
+    );
+    const line = resamplePath([input.observer, input.target], count);
     if (line.kind === 'degenerate') {
       throw ctx.fail(
         'same_endpoints',
@@ -294,7 +319,7 @@ export const checkLineOfSightTool = tool('elevation_check_line_of_sight', {
       );
     }
 
-    const sampled = await getElevationSampler().sample(line.samples, input.source, ctx);
+    const sampled = await getElevationSampler().sample(line.samples, input.source, ctx, 'computed');
     ctx.enrich({
       attribution: attributionFor(sampled),
       vertical_reference: verticalReferenceFor(sampled, getElevationSampler().publicOpenTopoData),
@@ -339,6 +364,7 @@ export const checkLineOfSightTool = tool('elevation_check_line_of_sight', {
             }),
             input.frequency_mhz,
           );
+    const { datasets_used, resolution_m_range } = summarizeProvenance(sampled);
     const result = {
       verdict: los.verdict,
       distance_m: roundTo(line.total_distance_m, 1),
@@ -364,11 +390,26 @@ export const checkLineOfSightTool = tool('elevation_check_line_of_sight', {
       samples: sampled.length,
       samples_with_data: samplesWithData,
       missing_samples: sampled.length - samplesWithData,
-      datasets_used: summarizeProvenance(sampled).datasets_used,
+      datasets_used,
       source_mode: input.source,
     };
 
-    const fragments: string[] = [];
+    const fragments: string[] = clampNotice ? [clampNotice] : [];
+    const spacing = result.sample_interval_m;
+    const finestResolution = resolution_m_range?.min_m;
+    if (
+      los.verdict !== 'blocked' &&
+      finestResolution !== undefined &&
+      spacing > 30 &&
+      spacing > 20 * finestResolution
+    ) {
+      const risk = `Samples are ${spacing} m apart against a ${finestResolution} m source; a ridge can fall between samples.`;
+      fragments.push(
+        count < MAX_SAMPLES
+          ? `${risk} To check more densely, increase samples up to ${MAX_SAMPLES}.`
+          : `${risk} At the ${MAX_SAMPLES}-sample cap, the terrain verdict applies at the sampled points.`,
+      );
+    }
     if (los.verdict === 'indeterminate') {
       const reroute =
         input.source === 'auto'

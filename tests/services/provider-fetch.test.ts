@@ -3,13 +3,38 @@
  * @module tests/services/provider-fetch.test
  */
 import { execFile } from 'node:child_process';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import { promisify } from 'node:util';
 import { expect, it } from 'vitest';
 
 const exec = promisify(execFile);
+
+/** Bun's forced-runtime PATH shim must not stand in for the Node control. */
+async function nodeExecutable(): Promise<string> {
+  if (!process.versions.bun) return process.execPath;
+  const searchPath = process.env.PATH;
+  if (!searchPath) throw new Error('PATH is required to locate the Node transport control.');
+  const bunExecutable = await realpath(process.execPath);
+  for (const directory of searchPath.split(delimiter)) {
+    try {
+      const candidate = await realpath(
+        join(directory, process.platform === 'win32' ? 'node.exe' : 'node'),
+      );
+      if (candidate !== bunExecutable) return candidate;
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        'code' in error &&
+        (error.code === 'ENOENT' || error.code === 'ENOTDIR')
+      )
+        continue;
+      throw error;
+    }
+  }
+  throw new Error('Install Node to run the Node provider transport control.');
+}
 
 it.each(['node', 'bun'])(
   '%s provider transport negotiates safely and closes',
@@ -79,7 +104,8 @@ it.each(['node', 'bun'])(
         await transport?.close();await control?.close();server.close();await once(server,'close');
       }
     `;
-      const { stdout } = await exec(runtime, ['--input-type=module', '-e', probe], {
+      const executable = runtime === 'node' ? await nodeExecutable() : runtime;
+      const { stdout } = await exec(executable, ['--input-type=module', '-e', probe], {
         env: { ...process.env, NODE_EXTRA_CA_CERTS: cert },
         timeout: 15_000,
       });

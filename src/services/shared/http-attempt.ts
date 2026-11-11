@@ -92,26 +92,43 @@ export async function runTimedAttempt<T>(
 
 /**
  * Reads a response body as UTF-8 text, stopping at `maxBytes`. Returns
- * `undefined` when the body exceeds the ceiling; the stream is cancelled then.
+ * `undefined` when the body exceeds the ceiling. Cancels the read at that
+ * ceiling or when the optional signal aborts.
  */
 export async function readBoundedText(
   response: Response,
   maxBytes: number,
+  signal?: AbortSignal,
 ): Promise<string | undefined> {
   if (!response.body) return '';
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let received = 0;
   let text = '';
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) return text + decoder.decode();
-    received += value.byteLength;
-    if (received > maxBytes) {
-      await reader.cancel();
-      return;
+  let cancellation: Promise<void> | undefined;
+  const cancel = () => {
+    // An errored fetch stream can reject cancellation with the same abort reason.
+    cancellation = reader.cancel().catch(() => {});
+  };
+  if (signal?.aborted) cancel();
+  signal?.addEventListener('abort', cancel, { once: true });
+  try {
+    for (;;) {
+      signal?.throwIfAborted();
+      const { done, value } = await reader.read();
+      signal?.throwIfAborted();
+      if (done) return text + decoder.decode();
+      received += value.byteLength;
+      if (received > maxBytes) {
+        await reader.cancel();
+        return;
+      }
+      text += decoder.decode(value, { stream: true });
     }
-    text += decoder.decode(value, { stream: true });
+  } finally {
+    signal?.removeEventListener('abort', cancel);
+    if (cancellation) await cancellation;
+    reader.releaseLock();
   }
 }
 

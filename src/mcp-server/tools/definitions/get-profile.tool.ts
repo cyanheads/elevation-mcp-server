@@ -23,6 +23,11 @@ import {
   summarizeProvenance,
   VerticalReferenceSchema,
 } from '@/mcp-server/tools/shared/outputs.js';
+import {
+  clampSampleCount,
+  MAX_SAMPLES,
+  sampleCountInput,
+} from '@/mcp-server/tools/shared/sample-count.js';
 import { attributionFor, verticalReferenceFor } from '@/services/elevation/attribution.js';
 import { getElevationSampler } from '@/services/elevation/elevation-sampler.js';
 import { profileStats, resamplePath } from '@/services/elevation/geometry.js';
@@ -33,8 +38,6 @@ import {
   type SourceMode,
 } from '@/services/elevation/types.js';
 import { metersToFeet, roundTo } from '@/services/elevation/units.js';
-
-const MAX_SAMPLES = 250;
 
 const ProfileSampleSchema = z
   .object({
@@ -94,17 +97,21 @@ const toRoutePoint = (sample: LocatedSample & { elevation_m: number }) => ({
 export const getProfileTool = tool('elevation_get_profile', {
   title: 'Get Route Elevation Profile',
   description:
-    "Sample terrain elevation at evenly spaced points along a route (a polyline of 2–1,000 vertices) and summarize it. Returns total distance, cumulative ascent and descent, start, end, minimum, and maximum elevation, and the steepest climb and descent grades, plus the per-sample profile with each sample's dataset unless include_samples is false. Ascent and descent are summed between samples, so they depend on the sample spacing reported in the result: denser sampling captures more small climbs, down to the source's resolution. Over open water, Mapzen samples are sea-floor depths. Each USGS 3DEP sample is a separate upstream request, so up to 250 samples take roughly 10–30 seconds.",
+    "Sample terrain elevation at evenly spaced points along a route (a polyline of 2–1,000 vertices) and summarize it. Returns total distance, cumulative ascent and descent, start, end, minimum, and maximum elevation, and the steepest climb and descent grades, plus the per-sample profile with each sample's dataset unless include_samples is false. Ascent and descent are summed between samples, so they depend on the sample spacing reported in the result: denser sampling captures more small climbs, down to the source's resolution. Over open water, Mapzen samples are sea-floor depths.",
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   auth: ['tool:elevation_get_profile:read'],
   input: z.object({
     path: boundedArray(PointSchema, 2, 1_000).describe(
       'Route vertices in travel order, 2–1,000 {lat, lon} objects in decimal degrees (WGS84). Consecutive duplicate vertices are ignored. Antipodal retained segments require an intermediate waypoint, even with endpoint-only sampling; errors identify zero-based submitted vertex indices.',
     ),
-    samples: blankAsUnset(z.number().int().min(2).max(MAX_SAMPLES).default(100)).describe(
+    samples: sampleCountInput(2, 'elevation_get_profile').describe(
       'Number of evenly spaced samples along the route, endpoints included (2–250, default 100). More samples catch more relief and take longer; spacing finer than the source resolution adds no detail. For a large count where only the summary matters, set include_samples to false.',
     ),
-    include_samples: blankAsUnset(z.boolean().default(true)).describe(
+    include_samples: blankAsUnset(z.boolean().default(true), {
+      kind: 'boolean',
+      tool: 'elevation_get_profile',
+      field: 'include_samples',
+    }).describe(
       'Return the per-sample profile (default true). false omits samples and the sample table; the summary, spacing, coverage counts, datasets, notices, and attribution are unchanged, still computed from every sample.',
     ),
     source: SourceSchema,
@@ -180,7 +187,7 @@ export const getProfileTool = tool('elevation_get_profile', {
       .string()
       .optional()
       .describe(
-        'Guidance on samples without data, routes crossing the USGS 3DEP coverage edge, Mapzen sea-floor values, and sample spacing against the source resolution.',
+        'Guidance on clamped counts, samples without data, routes crossing the USGS 3DEP coverage edge, Mapzen sea-floor values, and sample spacing against the source resolution.',
       ),
     attribution: z
       .string()
@@ -263,15 +270,20 @@ export const getProfileTool = tool('elevation_get_profile', {
     {
       reason: 'sampling_deadline_exceeded',
       code: JsonRpcErrorCode.Timeout,
-      when: "The call's 45 s sampling budget ran out (a retry deadline, or a wait in either provider's request queue), or the USGS 3DEP lookups other calls had queued, plus this call's, would not drain within the calls' budgets, so it sent none and data.retryAfter gives the seconds until the queued lookups drain.",
+      when: "The call's 45 s sampling budget ran out, or its individual USGS 3DEP lookups could not fit within the remaining budget alongside queued lookups. When data.retryAfter is present, it gives the seconds until the queued lookups drain.",
       recovery:
-        'If the budget ran out waiting on USGS 3DEP, re-call elevation_get_profile with fewer samples or a shorter route, since each 3DEP sample is its own upstream request, or, when the error carries retryAfter (other calls held 3DEP), retry it after that many seconds; if it ran out waiting on Open Topo Data, retry in a minute, or re-call it with source usgs_3dep for a route inside USGS 3DEP coverage.',
+        'If the budget ran out waiting on USGS 3DEP, re-call elevation_get_profile with fewer samples or a shorter route, or retry after the indicated number of seconds when the error carries retryAfter. If it ran out waiting on Open Topo Data, retry in a minute or re-call with source usgs_3dep for a route inside USGS 3DEP coverage.',
       thrownBy: 'service',
     },
   ],
 
   async handler(input, ctx) {
-    const route = resamplePath(input.path, input.samples);
+    const { count, notice: clampNotice } = clampSampleCount(
+      input.samples,
+      'elevation_get_profile',
+      ctx,
+    );
+    const route = resamplePath(input.path, count);
     if (route.kind === 'antipodal') {
       throw ctx.fail(
         'antipodal_path',
@@ -287,7 +299,12 @@ export const getProfileTool = tool('elevation_get_profile', {
       );
     }
 
-    const sampled = await getElevationSampler().sample(route.samples, input.source, ctx);
+    const sampled = await getElevationSampler().sample(
+      route.samples,
+      input.source,
+      ctx,
+      'computed',
+    );
     ctx.enrich({
       attribution: attributionFor(sampled),
       vertical_reference: verticalReferenceFor(sampled, getElevationSampler().publicOpenTopoData),
@@ -362,7 +379,7 @@ export const getProfileTool = tool('elevation_get_profile', {
       source_mode: input.source,
     };
 
-    const notice = buildNotice(result, samples, input.samples);
+    const notice = buildNotice(result, samples, clampNotice);
     if (notice) ctx.enrich.notice(notice);
     return result;
   },
@@ -428,9 +445,9 @@ interface NoticeInput {
 function buildNotice(
   result: NoticeInput,
   samples: readonly ProfileSample[],
-  requestedSamples: number,
+  clampNotice: string | undefined,
 ): string | undefined {
-  const fragments: string[] = [];
+  const fragments: string[] = clampNotice ? [clampNotice] : [];
   const total = samples.length;
   const missing = result.missing_samples;
   if (missing > 0) {
@@ -466,10 +483,12 @@ function buildNotice(
   if (range && interval > 20 * range.min_m && interval > 30) {
     const spacing = `Samples are ${interval} m apart against a ${range.min_m} m source`;
     fragments.push(
-      requestedSamples < MAX_SAMPLES
+      total < MAX_SAMPLES
         ? `${spacing}; raise samples (up to ${MAX_SAMPLES}) or split the route to capture more relief.`
         : `${spacing} even at the ${MAX_SAMPLES}-sample cap; split the route into shorter calls and sum their ascent and descent to capture more relief.`,
     );
+  } else if (clampNotice) {
+    fragments.push('For more samples, split the route into shorter calls.');
   }
   return fragments.length > 0 ? fragments.join(' ') : undefined;
 }

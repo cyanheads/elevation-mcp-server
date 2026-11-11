@@ -23,11 +23,13 @@ import { epqsByPoint, otdByPoint } from '../fixtures/harness.js';
 import type { OtdAnswer } from '../fixtures/opentopodata.js';
 import {
   at,
+  catalogRequestCount,
   contentText,
   epqsAnswers,
   epqsRequestCount,
   errorOf,
   expectDeclaredError,
+  imageSampleRequestCount,
   leafStrings,
   mapzen,
   otdAnswers,
@@ -65,6 +67,9 @@ const NA_LINE = {
 
 const run = (input: unknown, context?: Parameters<typeof runTool>[2]) =>
   runTool(checkLineOfSightTool, input, context);
+
+const coarseSpacing = (spacing: number, resolution: number) =>
+  `Samples are ${spacing} m apart against a ${resolution} m source; a ridge can fall between samples. To check more densely, increase samples up to 250.`;
 
 /** A flat-earth, zero-height 1 km line with 10 m endpoints and the given interior terrain. */
 const kilometer = (interior: (number | undefined)[], extra: Record<string, unknown> = {}) => {
@@ -292,13 +297,13 @@ describe('input validation', () => {
     ['an observer height over 10,000', { ...base, observer_height_m: 10_000.1 }],
     ['a negative target height', { ...base, target_height_m: -1 }],
     ['a target height over 10,000', { ...base, target_height_m: 10_001 }],
-    ['a height as a numeric string', { ...base, observer_height_m: '5' }],
+    ['a height as a noncanonical string', { ...base, observer_height_m: '05' }],
     ['an unknown earth model', { ...base, earth_model: 'curved' }],
     ['a numeric earth model', { ...base, earth_model: 1 }],
     ['samples 2', { ...base, samples: 2 }],
-    ['samples 251', { ...base, samples: 251 }],
+    ['samples 1001', { ...base, samples: 1001 }],
     ['samples 3.5', { ...base, samples: 3.5 }],
-    ['samples as a numeric string', { ...base, samples: '10' }],
+    ['samples as a noncanonical string', { ...base, samples: '010' }],
     ['an unknown source', { ...base, source: 'srtm' }],
   ])('rejects %s', (_name, input) => {
     expect(parse(input).success).toBe(false);
@@ -330,11 +335,11 @@ describe('input validation', () => {
   it.each([
     ['water_surface_m below -500', 'water_surface_m', -500.1, 'too_small'],
     ['water_surface_m over 9,000', 'water_surface_m', 9_000.1, 'too_big'],
-    ['water_surface_m as a numeric string', 'water_surface_m', '0', 'invalid_type'],
+    ['water_surface_m as a noncanonical string', 'water_surface_m', '-0', 'invalid_type'],
     ['frequency_mhz below 30', 'frequency_mhz', 29.9, 'too_small'],
     ['frequency_mhz 0', 'frequency_mhz', 0, 'too_small'],
     ['frequency_mhz over 300,000', 'frequency_mhz', 300_000.1, 'too_big'],
-    ['frequency_mhz as a numeric string', 'frequency_mhz', '5800', 'invalid_type'],
+    ['frequency_mhz as a noncanonical string', 'frequency_mhz', '5.8e3', 'invalid_type'],
   ])('rejects %s on that field alone', (_name, field, value, code) => {
     const issues = parse({ ...base, [field]: value }).error?.issues ?? [];
     expect(issues.map((issue) => [issue.path.join('.'), issue.code])).toEqual([[field, code]]);
@@ -730,7 +735,7 @@ describe('sea-surface case', () => {
     const out = structured(await fiftyKm());
     expect(out.verdict).toBe('clear');
     expect(out.limiting_point).toMatchObject({ surface_elevation_m: -50, clearance_m: 8.18 });
-    expect(out).not.toHaveProperty('notice');
+    expect(out.notice).toBe(coarseSpacing(25_000, 30.9));
   });
 
   it('measures an endpoint at -20 m from the sea surface and reports ground and surface apart', async () => {
@@ -833,7 +838,7 @@ describe('USGS 3DEP values below 0 m', () => {
 
   it('says the 3DEP value below 0 m was measured as received and names water_surface_m', async () => {
     const result = await usgsFiftyKm(-50);
-    const expected = `1 USGS 3DEP sample lies below 0 m and is measured as received: ${BELOW_ZERO_REMEDY}`;
+    const expected = `${coarseSpacing(25_000, 1)} 1 USGS 3DEP sample lies below 0 m and is measured as received: ${BELOW_ZERO_REMEDY}`;
     expect(structured(result).notice).toBe(expected);
     expect(contentText(result)).toContain(`> ${expected}`);
   });
@@ -922,7 +927,7 @@ describe('water_surface_m', () => {
       surface_elevation_m: 0.5,
     });
     expect(out.notice).toBe(
-      '2 samples lie below the 0.5 m water surface set by water_surface_m, so clearance there is measured to it.',
+      `${coarseSpacing(500, 1)} 2 samples lie below the 0.5 m water surface set by water_surface_m, so clearance there is measured to it.`,
     );
   });
 
@@ -1033,7 +1038,7 @@ describe('first Fresnel zone (frequency_mhz)', () => {
         resolution_m: 30.9,
       },
     });
-    expect(out).not.toHaveProperty('notice');
+    expect(out.notice).toBe(coarseSpacing(5_000, 30.9));
     expect(checkLineOfSightTool.output.safeParse(out).success).toBe(true);
   });
 
@@ -1046,8 +1051,7 @@ describe('first Fresnel zone (frequency_mhz)', () => {
       min_clearance_ratio: 0.44,
       limiting_point: { distance_from_observer_m: 5_000, fresnel_radius_m: 11.37, clearance_m: 5 },
     });
-    const expected =
-      "The sightline clears the terrain but not 60% of the first Fresnel zone at 5800 MHz: at 5000 m from the observer it clears 0.44 of the zone's 11.37 m radius, so expect diffraction loss.";
+    const expected = `${coarseSpacing(5_000, 30.9)} The sightline clears the terrain but not 60% of the first Fresnel zone at 5800 MHz: at 5000 m from the observer it clears 0.44 of the zone's 11.37 m radius, so expect diffraction loss.`;
     expect(out.notice).toBe(expected);
     expect(contentText(result)).toContain(`> ${expected}`);
   });
@@ -1056,7 +1060,7 @@ describe('first Fresnel zone (frequency_mhz)', () => {
     const result = await tenKm(6.83, [0]);
     const out = structured(result);
     expect(out.fresnel).toMatchObject({ verdict: 'sufficient', min_clearance_ratio: 0.6 });
-    expect(out).not.toHaveProperty('notice');
+    expect(out.notice).toBe(coarseSpacing(5_000, 30.9));
     expect(contentText(result)).toContain(
       '- **Fresnel zone at 5800 MHz:** sufficient against the 60% free-space bar; minimum clearance ratio 0.6\n',
     );
@@ -1139,7 +1143,7 @@ describe('first Fresnel zone (frequency_mhz)', () => {
       limiting_point: { fresnel_radius_m: 64.53, clearance_m: 23.21 },
     });
     expect(out.notice).toBe(
-      "The sightline clears the terrain but not 60% of the first Fresnel zone at 900 MHz: at 25000 m from the observer it clears 0.36 of the zone's 64.53 m radius, so expect diffraction loss. " +
+      `${coarseSpacing(25_000, 1)} The sightline clears the terrain but not 60% of the first Fresnel zone at 900 MHz: at 25000 m from the observer it clears 0.36 of the zone's 64.53 m radius, so expect diffraction loss. ` +
         '1 sample lies below the 0 m water surface set by water_surface_m, so clearance there is measured to it.',
     );
   });
@@ -1433,6 +1437,111 @@ describe('attribution on every success path', () => {
 });
 
 describe('notices', () => {
+  it('keeps quiet at 30 m spacing even with 1 m source data', async () => {
+    const result = await usgsMeridian(60, () => 10, {
+      earth_model: 'flat',
+      observer_height_m: 20,
+      target_height_m: 20,
+      samples: 3,
+    });
+    const out = structured(result);
+    expect(out.verdict).toBe('clear');
+    expect(out.sample_interval_m).toBe(30);
+    expect(out).not.toHaveProperty('notice');
+  });
+
+  it('keeps quiet at exactly 20 times the source resolution', async () => {
+    useUpstreams({ otd: otdByPoint(() => srtm(10)) });
+    const result = await run(
+      equator(1236, {
+        earth_model: 'flat',
+        observer_height_m: 20,
+        target_height_m: 20,
+        samples: 3,
+      }),
+    );
+    const out = structured(result);
+    expect(out.verdict).toBe('clear');
+    expect(out.sample_interval_m).toBe(618);
+    expect(out).not.toHaveProperty('notice');
+  });
+
+  it('omits the spacing notice on a coarse Mapzen-only line with unknown resolution', async () => {
+    useUpstreams({ otd: otdByPoint(() => mapzen(10)) });
+    const result = await run(
+      equator(2_000, {
+        earth_model: 'flat',
+        observer_height_m: 20,
+        target_height_m: 20,
+        samples: 3,
+      }),
+    );
+    const out = structured(result);
+    expect(out.verdict).toBe('clear');
+    expect(out.sample_interval_m).toBe(1000);
+    expect(out).not.toHaveProperty('notice');
+  });
+
+  it('omits the spacing notice when coarse samples already prove an obstruction', async () => {
+    useUpstreams({
+      otd: lineOtd([
+        [0, srtm(10)],
+        [1_000, srtm(100)],
+        [2_000, srtm(10)],
+      ]),
+    });
+    const result = await run(
+      equator(2_000, {
+        earth_model: 'flat',
+        observer_height_m: 20,
+        target_height_m: 20,
+        samples: 3,
+      }),
+    );
+    const out = structured(result);
+    expect(out.verdict).toBe('blocked');
+    expect(out.sample_interval_m).toBe(1000);
+    expect(out).not.toHaveProperty('notice');
+  });
+
+  it('warns when a clear sightline can miss ridges between coarse samples', async () => {
+    useUpstreams({ otd: otdByPoint(() => srtm(10)) });
+    const result = await run(
+      equator(2_000, {
+        earth_model: 'flat',
+        observer_height_m: 20,
+        target_height_m: 20,
+        samples: 3,
+      }),
+    );
+    const out = structured(result);
+    expect(out.verdict).toBe('clear');
+    expect(out.notice).toContain('Samples are 1000 m apart against a 30.9 m source');
+    expect(out.notice).toContain('increase samples up to 250');
+    expect(contentText(result)).toContain(out.notice);
+  });
+
+  it.each([250, 251])('gives at-cap spacing guidance for %i requested samples', async (samples) => {
+    useUpstreams({ otd: otdByPoint(() => srtm(10)) });
+    const result = await run(
+      equator(249_000, {
+        earth_model: 'flat',
+        observer_height_m: 20,
+        target_height_m: 20,
+        samples,
+      }),
+    );
+    const out = structured(result);
+    expect(out.samples).toBe(250);
+    const clamp = 'Samples clamped from 251 to the 250-sample cap. ';
+    expect(out.notice?.startsWith(`${samples === 251 ? clamp : ''}Samples are 1000 m apart`)).toBe(
+      true,
+    );
+    expect(out.notice).toContain('applies at the sampled points');
+    expect(out.notice).not.toContain('increase samples');
+    expect(contentText(result)).toContain(out.notice);
+  });
+
   it('omits the notice when nothing needs saying', async () => {
     const { result } = await kilometer([5]);
     expect(structured(result)).not.toHaveProperty('notice');
@@ -1499,7 +1608,7 @@ describe('notices', () => {
     });
     const result = await run({ ...NA_LINE, samples: 3, earth_model: 'flat', observer_height_m: 0 });
     expect(structured(result).notice).toBe(
-      'The line crosses the USGS 3DEP coverage edge (2 samples from USGS 3DEP, 1 from Open Topo Data); clearances compare terrain of different resolution and surface model.',
+      `${coarseSpacing(111.2, 1)} The line crosses the USGS 3DEP coverage edge (2 samples from USGS 3DEP, 1 from Open Topo Data); clearances compare terrain of different resolution and surface model.`,
     );
   });
 
@@ -1534,7 +1643,7 @@ describe('notices', () => {
     const result = await run({ ...NA_LINE, samples: 3 });
     expect(structured(result).verdict).toBe('indeterminate');
     expect(structured(result).notice).toBe(
-      '1 interior sample has no data and no sample with data blocks the line, so the sightline cannot be confirmed clear; check the gap with elevation_get_profile on the same two points. ' +
+      `${coarseSpacing(111.2, 1)} 1 interior sample has no data and no sample with data blocks the line, so the sightline cannot be confirmed clear; check the gap with elevation_get_profile on the same two points. ` +
         'The line crosses the USGS 3DEP coverage edge (1 sample from USGS 3DEP, 1 from Open Topo Data); clearances compare terrain of different resolution and surface model. ' +
         '1 sample lies over open water, where Mapzen reports sea-floor depth, so clearance there is measured to the sea surface at 0 m.',
     );
@@ -1548,7 +1657,7 @@ describe('notices', () => {
     const result = await run({ ...NA_LINE, samples: 3, observer_height_m: 1.7 });
     expect(structured(result).verdict).toBe('clear');
     expect(structured(result).notice).toBe(
-      'Minimum clearance is under 2 m at 111.2 m from the observer; DEM vertical error, vegetation, and structures can close a margin that small. ' +
+      `${coarseSpacing(111.2, 1)} Minimum clearance is under 2 m at 111.2 m from the observer; DEM vertical error, vegetation, and structures can close a margin that small. ` +
         'The line crosses the USGS 3DEP coverage edge (1 sample from USGS 3DEP, 2 from Open Topo Data); clearances compare terrain of different resolution and surface model. ' +
         '1 sample lies over open water, where Mapzen reports sea-floor depth, so clearance there is measured to the sea surface at 0 m.',
     );
@@ -1562,7 +1671,7 @@ describe('notices', () => {
     const result = await run({ ...NA_LINE, samples: 3 });
     expect(structured(result).verdict).toBe('clear');
     expect(structured(result).notice).toBe(
-      'Minimum clearance is under 2 m at 111.2 m from the observer; DEM vertical error, vegetation, and structures can close a margin that small. ' +
+      `${coarseSpacing(111.2, 1)} Minimum clearance is under 2 m at 111.2 m from the observer; DEM vertical error, vegetation, and structures can close a margin that small. ` +
         'The line crosses the USGS 3DEP coverage edge (1 sample from USGS 3DEP, 2 from Open Topo Data); clearances compare terrain of different resolution and surface model. ' +
         '1 sample lies over open water, where Mapzen reports sea-floor depth, so clearance there is measured to the sea surface at 0 m. ' +
         '1 USGS 3DEP sample lies below 0 m and is measured as received: bay-floor bathymetry where 3DEP carries it, or land or water below sea level. If the line crosses water, re-call elevation_check_line_of_sight with water_surface_m set to the water level.',
@@ -1584,7 +1693,7 @@ describe('notices', () => {
     expect(structured(result).verdict).toBe('clear');
     expect(structured(result).fresnel.verdict).toBe('insufficient');
     expect(structured(result).notice).toBe(
-      'Minimum clearance is under 2 m at 111.2 m from the observer; DEM vertical error, vegetation, and structures can close a margin that small. ' +
+      `${coarseSpacing(111.2, 1)} Minimum clearance is under 2 m at 111.2 m from the observer; DEM vertical error, vegetation, and structures can close a margin that small. ` +
         "The sightline clears the terrain but not 60% of the first Fresnel zone at 5800 MHz: at 111.2 m from the observer it clears 0.5 of the zone's 1.7 m radius, so expect diffraction loss. " +
         'The line crosses the USGS 3DEP coverage edge (1 sample from USGS 3DEP, 2 from Open Topo Data); clearances compare terrain of different resolution and surface model. ' +
         '1 sample lies below the 0 m water surface set by water_surface_m, so clearance there is measured to it.',
@@ -1601,7 +1710,9 @@ describe('source modes', () => {
     expect(structured(result).source_mode).toBe('usgs_3dep');
     expect(structured(result).datasets_used).toEqual({ usgs_3dep: 3, srtm30m: 0, mapzen: 0 });
     expect(await otdRequests(http)).toHaveLength(0);
-    expect(epqsRequestCount(http)).toBe(3);
+    expect(imageSampleRequestCount(http)).toBe(1);
+    expect(epqsRequestCount(http)).toBe(0);
+    expect(catalogRequestCount(http)).toBe(0);
   });
 
   it('opentopodata sends nothing to 3DEP', async () => {

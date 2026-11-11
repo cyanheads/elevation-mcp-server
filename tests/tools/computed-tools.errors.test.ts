@@ -27,8 +27,11 @@ import {
   parseSentLocations,
 } from '../fixtures/opentopodata.js';
 import {
+  epqsRequestCount,
   errorOf,
   expectDeclaredError,
+  imageSampleRequestCount,
+  otdRequests,
   runTool,
   srtm,
   type ToolDefinition,
@@ -36,7 +39,7 @@ import {
   useUpstreams,
 } from '../fixtures/tool-harness.js';
 
-/** A call over 3DEP territory (the Puget Sound lowlands) that sends one request per node to either provider. */
+/** A small call over 3DEP territory in the Puget Sound lowlands. */
 const SPECS: {
   input: (source: string) => Record<string, unknown>;
   label: string;
@@ -288,10 +291,16 @@ describe.each(SPECS)('$label service failures on the wire', ({ tool, input }) =>
   });
 
   it('a 3DEP outage does not fall back to Open Topo Data', async () => {
-    const http = useUpstreams({ epqs: () => epqsResponse('', 403), otd: otdByPoint() });
+    const http = useUpstreams({
+      imageSamples: () => new Response('', { status: 403 }),
+      epqs: () => epqsResponse('', 403),
+      otd: otdByPoint(),
+    });
     const result = await run('auto');
     expect(errorOf(result).data?.reason).toBe('usgs_unavailable');
-    expect(http.calls.every((call) => call.request.method === 'GET')).toBe(true);
+    expect(imageSampleRequestCount(http)).toBe(1);
+    expect(epqsRequestCount(http)).toBeGreaterThan(0);
+    expect(await otdRequests(http)).toHaveLength(0);
   });
 
   it('an upstream failure returns no partial result and no attribution', async () => {

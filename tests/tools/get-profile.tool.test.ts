@@ -20,11 +20,13 @@ import { epqsByPoint, otdByPoint } from '../fixtures/harness.js';
 import type { OtdAnswer } from '../fixtures/opentopodata.js';
 import {
   at,
+  catalogRequestCount,
   contentText,
   epqsAnswers,
   epqsRequestCount,
   errorOf,
   expectDeclaredError,
+  imageSampleRequestCount,
   leafStrings,
   mapzen,
   otdAnswers,
@@ -209,12 +211,12 @@ describe('input validation', () => {
     ['latitude 91', { path: [{ lat: 91, lon: 0 }, END] }],
     ['longitude -181', { path: [{ lat: 0, lon: -181 }, END] }],
     ['samples 1', { path: ROUTE, samples: 1 }],
-    ['samples 251', { path: ROUTE, samples: 251 }],
+    ['samples 1001', { path: ROUTE, samples: 1001 }],
     ['samples 0', { path: ROUTE, samples: 0 }],
     ['samples 2.5', { path: ROUTE, samples: 2.5 }],
-    ['samples as a numeric string', { path: ROUTE, samples: '25' }],
+    ['samples as a noncanonical string', { path: ROUTE, samples: '025' }],
     ['samples null', { path: ROUTE, samples: null }],
-    ['include_samples as a string', { path: ROUTE, include_samples: 'false' }],
+    ['include_samples as a noncanonical string', { path: ROUTE, include_samples: 'False' }],
     ['include_samples null', { path: ROUTE, include_samples: null }],
     ['an unknown source', { path: ROUTE, source: 'srtm' }],
   ])('rejects %s', (_name, input) => {
@@ -235,7 +237,7 @@ describe('input validation', () => {
       ['out-of-range latitude', { path: [{ lat: 91, lon: 0 }, END] }, 'path.0.lat'],
       ['a misspelled key', { path: [START, { lat: 1, lan: 2 }] }, 'path.1.lon'],
       ['samples 1', { path: ROUTE, samples: 1 }, 'samples'],
-      ['samples 251', { path: ROUTE, samples: 251 }, 'samples'],
+      ['samples 1001', { path: ROUTE, samples: 1001 }, 'samples'],
       ['include_samples as a word', { path: ROUTE, include_samples: 'no' }, 'include_samples'],
       ['a bad source', { path: ROUTE, source: 'srtm' }, 'source'],
     ])('returns InvalidParams naming the field for %s', async (_name, input, path) => {
@@ -272,7 +274,7 @@ describe('input validation', () => {
 
 describe('success results', () => {
   it('summarizes a route with a gap: ascent, descent, grades, extremes, and provenance', async () => {
-    const { result } = await runRoute([srtm(100), undefined, srtm(110), srtm(105), srtm(110)]);
+    const { result } = await runRoute([srtm(100), undefined, srtm(110), srtm(105), srtm(109)]);
 
     expect(result.isError).toBeUndefined();
     const out = structured(result);
@@ -308,8 +310,8 @@ describe('success results', () => {
         distance_m: 222.4,
         lat: 47.002,
         lon: -122,
-        elevation_m: 110,
-        grade_pct: 9,
+        elevation_m: 109,
+        grade_pct: 7.2,
         dataset: 'srtm30m',
         resolution_m: 30.9,
       },
@@ -317,11 +319,11 @@ describe('success results', () => {
     expect(out.summary).toStrictEqual({
       total_distance_m: 222.4,
       start_elevation_m: 100,
-      end_elevation_m: 110,
-      net_change_m: 10,
-      ascent_m: 15,
+      end_elevation_m: 109,
+      net_change_m: 9,
+      ascent_m: 14,
       descent_m: 5,
-      ascent_ft: 49.2,
+      ascent_ft: 45.9,
       descent_ft: 16.4,
       min_elevation_m: 100,
       max_elevation_m: 110,
@@ -455,7 +457,9 @@ describe('success results', () => {
     expect(out.datasets_used).toEqual({ usgs_3dep: 2, srtm30m: 0, mapzen: 0 });
     expect(out.resolution_m_range).toEqual({ min_m: 1, max_m: 1 });
     expect(await otdRequests(http)).toHaveLength(0);
-    expect(epqsRequestCount(http)).toBe(5);
+    expect(imageSampleRequestCount(http)).toBe(1);
+    expect(epqsRequestCount(http)).toBe(3);
+    expect(catalogRequestCount(http)).toBe(0);
   });
 
   it('fills 3DEP misses from Open Topo Data in auto and reports both datasets', async () => {
@@ -727,6 +731,30 @@ describe('attribution on every success path', () => {
 });
 
 describe('notices', () => {
+  it('uses repaired arguments in the result and text', async () => {
+    useUpstreams({ otd: otdByPoint(() => srtm(100)) });
+    const result = await run({
+      path: ROUTE,
+      samples: '5',
+      include_samples: 'false',
+      source: 'opentopodata',
+    });
+    expect(structured(result).samples_with_data).toBe(5);
+    expect(structured(result)).not.toHaveProperty('samples');
+    expect(contentText(result)).not.toContain('| Dataset |');
+  });
+
+  it('serves at most 250 of 1000 requested samples and reports the clamp first', async () => {
+    const http = useUpstreams({ otd: otdByPoint(() => srtm(100)) });
+    const result = await run({ path: ROUTE, samples: 1_000, source: 'opentopodata' });
+    const out = structured(result);
+    const fragment = 'Samples clamped from 1000 to the 250-sample cap.';
+    expect(out.samples).toHaveLength(250);
+    expect(out.notice?.startsWith(fragment)).toBe(true);
+    expect(contentText(result)).toContain(fragment);
+    expect((await otdRequests(http)).map((chunk) => chunk.length)).toEqual([100, 100, 50]);
+  });
+
   it('omits the notice when nothing needs saying', async () => {
     const { result } = await runRoute([srtm(1), srtm(2), srtm(3), srtm(4), srtm(5)]);
     expect(structured(result)).not.toHaveProperty('notice');

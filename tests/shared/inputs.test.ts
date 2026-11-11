@@ -6,6 +6,9 @@
 
 import { z } from '@cyanheads/mcp-ts-core';
 import { describe, expect, it } from 'vitest';
+import { checkLineOfSightTool } from '@/mcp-server/tools/definitions/check-line-of-sight.tool.js';
+import { getGridTool } from '@/mcp-server/tools/definitions/get-grid.tool.js';
+import { getProfileTool } from '@/mcp-server/tools/definitions/get-profile.tool.js';
 import {
   blankAsUnset,
   boundedArray,
@@ -220,6 +223,63 @@ describe('blankAsUnset', () => {
   it('advertises only the wrapped schema', () => {
     const schema = z.toJSONSchema(samples, { io: 'input' }) as Record<string, unknown>;
     expect(schema).toMatchObject({ type: 'integer', minimum: 2, maximum: 250, default: 100 });
+  });
+});
+
+describe('optional tool scalars', () => {
+  const path = [
+    { lat: 47, lon: -122 },
+    { lat: 48, lon: -122 },
+  ];
+  const endpoints = { observer: path[0], target: path[1] };
+  const box = { south: 47, north: 48, west: -123, east: -122 };
+
+  it('keeps empty strings as defaults and primitive coordinates strict', () => {
+    expect(getProfileTool.input.parse({ path, samples: '', include_samples: '' })).toMatchObject({
+      samples: 100,
+      include_samples: true,
+    });
+    expect(getGridTool.input.safeParse({ ...box, south: '47' }).success).toBe(false);
+  });
+
+  it('repairs canonical strings on every wrapped number and boolean', () => {
+    expect(
+      getProfileTool.input.parse({ path, samples: ' 4 ', include_samples: 'false' }),
+    ).toMatchObject({
+      samples: 4,
+      include_samples: false,
+    });
+    expect(getGridTool.input.parse({ ...box, rows: '2', cols: '3' })).toMatchObject({
+      rows: 2,
+      cols: 3,
+    });
+    expect(
+      checkLineOfSightTool.input.parse({
+        ...endpoints,
+        observer_height_m: '1.7',
+        target_height_m: '0',
+        samples: '3',
+        water_surface_m: '-1.5',
+        frequency_mhz: '5800',
+      }),
+    ).toMatchObject({
+      observer_height_m: 1.7,
+      target_height_m: 0,
+      samples: 3,
+      water_surface_m: -1.5,
+      frequency_mhz: 5800,
+    });
+  });
+
+  it.each(['04', '4e0', '4.0', '+4', '0x4', ' ', '1', '1001', '4.5', null, true])(
+    'keeps invalid sample input %j invalid',
+    (samples) => {
+      expect(getProfileTool.input.safeParse({ path, samples }).success).toBe(false);
+    },
+  );
+
+  it.each(['False', '1', 'no', ' ', 0])('keeps invalid boolean input %j invalid', (value) => {
+    expect(getProfileTool.input.safeParse({ path, include_samples: value }).success).toBe(false);
   });
 });
 

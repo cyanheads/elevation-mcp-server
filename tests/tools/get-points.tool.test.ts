@@ -42,6 +42,12 @@ import {
   type OtdAnswer,
   otdResponse,
 } from '../fixtures/opentopodata.js';
+import {
+  CATALOG_URL,
+  catalogResponse,
+  catalogRoute,
+  defaultCatalogResponse,
+} from '../fixtures/usgs-image-server.js';
 
 type ToolResult = Awaited<ReturnType<typeof runToolContract>>;
 
@@ -54,6 +60,7 @@ const isSeattle = (point: { lat: number }) => point.lat === SEATTLE.lat;
 
 interface Upstreams {
   baseUrl?: string;
+  catalog?: Parameters<typeof catalogRoute>[0];
   epqs?: Parameters<typeof epqsRoute>[0];
   otd?: Parameters<typeof otdRoute>[1];
 }
@@ -63,8 +70,9 @@ function useUpstreams({
   baseUrl = OTD_SELF_HOSTED_BASE_URL,
   epqs = () => epqsResponse(EPQS_MISS_TEXTS.callFailed),
   otd = otdByPoint(),
+  catalog = defaultCatalogResponse,
 }: Upstreams = {}) {
-  const http = createFetchMock([epqsRoute(epqs), otdRoute(baseUrl, otd)]);
+  const http = createFetchMock([epqsRoute(epqs), otdRoute(baseUrl, otd), catalogRoute(catalog)]);
   initElevationServices({ openTopoDataBaseUrl: baseUrl }, { fetch: http.fetch });
   return http;
 }
@@ -267,7 +275,7 @@ describe('success results', () => {
         dataset: 'usgs_3dep',
         resolution_m: 30.9,
         raster_id: 102575,
-        acquisition_date: '6/5/2021',
+        acquisition_date: '2021-07-09',
       },
       {
         lat: 30,
@@ -360,6 +368,7 @@ describe('success results', () => {
       const http = useUpstreams({ otd: otdByPoint() });
       await run({ points: [SEATTLE], source: 'opentopodata' });
       expect(http.calls.every((call) => call.request.method === 'POST')).toBe(true);
+      expect(http.calls.map((call) => call.request.url)).not.toContain(CATALOG_URL);
     });
   });
 });
@@ -834,7 +843,7 @@ describe('format()', () => {
           dataset: 'usgs_3dep',
           resolution_m: 1,
           raster_id: 102575,
-          acquisition_date: '6/5/2021',
+          acquisition_date: '2021-07-09',
         },
         {
           lat: 30,
@@ -875,7 +884,7 @@ describe('format()', () => {
       .split('\n')
       .filter((line) => /^\| \d+ /.test(line));
     expect(rows).toEqual([
-      '| 1 | 47.6062, -122.3321 | ok | 52.38 / 171.9 | usgs_3dep | 1 | 102575 | 6/5/2021 |',
+      '| 1 | 47.6062, -122.3321 | ok | 52.38 / 171.9 | usgs_3dep | 1 | 102575 | 2021-07-09 |',
       '| 2 | 30, -140 | ok | -4389 / -14399.6 | mapzen | varies | — | — |',
       '| 3 | 80, 100 | no_data | no data | no data | no data | — | — |',
     ]);
@@ -916,9 +925,10 @@ describe('format()', () => {
     const hostileDate =
       '6/5/2021\r\n| injected | row |\r\n# Heading\n[link](https://evil.test) <b>x</b>';
 
-    it('omits a date not in M/D/YYYY form from both surfaces and keeps the elevation', async () => {
+    it('ignores the EPQS date and reports unavailable catalog metadata without losing elevation', async () => {
       useUpstreams({
         epqs: () => epqsResponse(epqsHitBody({ acquisitionDate: hostileDate })),
+        catalog: () => catalogResponse([]),
       });
       const result = await run({ points: [SEATTLE] });
 
@@ -929,6 +939,40 @@ describe('format()', () => {
       expect(everything).not.toContain('injected');
       expect(everything).not.toContain('evil.test');
       expect(contentText(result)).toContain('| 102575 | — |');
+      expect(structured(result).notice).toBe('Acquisition date unavailable for 1 USGS 3DEP point.');
+      expect(contentText(result)).toContain(
+        '> Acquisition date unavailable for 1 USGS 3DEP point.',
+      );
+    });
+
+    it('renders the available date alongside a notice for missing dates and preserves coverage counts', async () => {
+      const rainier = { lat: 46.8523, lon: -121.7603 };
+      const http = useUpstreams({
+        epqs: epqsByPoint((point) =>
+          epqsResponse(
+            epqsHitBody({
+              rasterId: isSeattle(point) ? 102575 : 8857,
+              acquisitionDate: hostileDate,
+            }),
+          ),
+        ),
+        otd: otdByPoint(() => ({ dataset: 'srtm30m', elevation: 18 })),
+      });
+      const result = await run({ points: [rainier, SEATTLE, LONDON, rainier] });
+      const out = structured(result);
+      expect(out.points_with_data).toBe(4);
+      expect(out.points?.map((point) => point.acquisition_date)).toEqual([
+        undefined,
+        '2021-07-09',
+        undefined,
+        undefined,
+      ]);
+      expect(out.notice).toContain('Values come from USGS 3DEP (3 points');
+      expect(out.notice).toContain('Acquisition date unavailable for 2 USGS 3DEP points.');
+      expect(contentText(result)).toContain('2021-07-09');
+      expect(contentText(result)).toContain(out.notice);
+      expect(contentText(result)).not.toContain('injected');
+      expect(http.calls.filter((call) => call.request.url === CATALOG_URL)).toHaveLength(1);
     });
 
     it('neutralizes link, HTML, and table syntax and line breaks in the table', () => {

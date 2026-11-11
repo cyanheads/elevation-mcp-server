@@ -4,7 +4,7 @@ description: Assess route terrain, refine candidate high points, and evaluate vi
 license: Apache-2.0
 metadata:
   author: "cyanheads"
-  version: "1.0"
+  version: "1.1"
 ---
 
 ## Scope
@@ -18,7 +18,7 @@ Use elevation-mcp-server for sampled terrain analysis. Obtain place coordinates 
 - Before naming an area's summit, distinguish the highest sampled node from the highest terrain in the box. A smaller grid around a candidate improves its local sampling; it cannot prove that no higher feature lies between nodes elsewhere in the original area.
 - Before evaluating a sightline, establish the observer and target positions and their eye or antenna heights above the applicable surface. Do not substitute an absolute elevation for a height above ground.
 - If a sightline crosses water and needs an explicit water level, establish a vertical reference compatible with the sampled terrain before setting it. Zero and a provider choice do not establish compatibility. If the reference cannot be established, state that the water-adjusted clearance remains unresolved.
-- Before concluding a path is clear, inspect the returned verdict and coverage. A known obstruction can establish blockage despite gaps; missing data cannot establish clearance. For radio, report geometric and Fresnel verdicts separately, and keep the conclusion limited to sampled terrain at the chosen refraction model.
+- Before concluding a path is clear, inspect the returned verdict, coverage, and spacing notice. A ridge can fall between samples. If the notice flags coarse spacing, raise `samples` up to 250 where possible and report any remaining limitation. A known obstruction can establish blockage despite gaps. Missing data cannot establish clearance. For radio, report geometric and Fresnel verdicts separately, and keep the conclusion limited to sampled terrain at the chosen refraction model.
 
 ## Workflows
 
@@ -26,7 +26,7 @@ Use elevation-mcp-server for sampled terrain analysis. Obtain place coordinates 
 
 Resolve the route's identity and obtain its polyline, then call elevation_get_profile on that geometry. Report the sampling and coverage alongside gain and grades. Use the returned extreme-grade distances to locate steep sections; matching a rounded grade against the sample list can select the wrong occurrence.
 
-If the decision depends on a short section that the returned spacing does not resolve, profile that section's actual vertices separately. Label the section result separately from the whole-route totals: a different sampling interval can change cumulative ascent and descent. Increasing the count beyond the answering raster's detail does not recover finer terrain.
+If the decision depends on a short section that the returned spacing does not resolve, profile that section's actual vertices separately. Label the section result separately from the whole-route totals: a different sampling interval can change cumulative ascent and descent. Increasing the count beyond the answering raster's detail does not recover finer terrain. Profile requests above 250 samples can be served at the cap. Check the notice and reported interval before treating a denser request as a denser result.
 
 ### Refine a candidate high point and assess its view
 

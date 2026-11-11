@@ -44,7 +44,9 @@
         "MCP_TRANSPORT_TYPE": "stdio",
         "MCP_AUTH_MODE": "none",
         "NODE_ENV": "production",
-        "OPENTOPODATA_BASE_URL": "${user_config.OPENTOPODATA_BASE_URL}"
+        "OPENTOPODATA_BASE_URL": "${user_config.OPENTOPODATA_BASE_URL}",
+        "ELEVATION_REPAIR_OPTIONAL_SCALARS": "${user_config.ELEVATION_REPAIR_OPTIONAL_SCALARS}",
+        "ELEVATION_CLAMP_LIMITS": "${user_config.ELEVATION_CLAMP_LIMITS}"
       }
     }
   },
@@ -56,6 +58,20 @@
   "tools_generated": true,
   "prompts_generated": false,
   "user_config": {
+    "ELEVATION_REPAIR_OPTIONAL_SCALARS": {
+      "type": "string",
+      "title": "Repair optional scalar inputs",
+      "description": "Set false to require JSON numbers and booleans on optional scalar inputs. Defaults to true.",
+      "required": false,
+      "default": ""
+    },
+    "ELEVATION_CLAMP_LIMITS": {
+      "type": "string",
+      "title": "Clamp terrain sample counts",
+      "description": "Set false to reject profile and sightline requests above 250 samples. Defaults to true.",
+      "required": false,
+      "default": ""
+    },
     "OPENTOPODATA_BASE_URL": {
       "type": "string",
       "title": "Open Topo Data base URL",

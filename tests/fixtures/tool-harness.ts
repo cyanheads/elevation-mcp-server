@@ -14,9 +14,17 @@ import {
 import { expect } from 'vitest';
 import { initElevationServices } from '@/services/elevation/elevation-sampler.js';
 import type { LatLon } from '@/services/elevation/types.js';
-import { EPQS_MISS_TEXTS, epqsHitBody, epqsResponse } from './epqs.js';
+import { EPQS_MISS_TEXTS, EPQS_ORIGIN, EPQS_PATH, epqsHitBody, epqsResponse } from './epqs.js';
 import { epqsByPoint, epqsRoute, otdByPoint, otdRoute } from './harness.js';
-import { OTD_SELF_HOSTED_BASE_URL, type OtdAnswer } from './opentopodata.js';
+import { OTD_PATH, OTD_SELF_HOSTED_BASE_URL, type OtdAnswer } from './opentopodata.js';
+import {
+  CATALOG_URL,
+  catalogRoute,
+  defaultCatalogResponse,
+  IMAGE_SAMPLE_URL,
+  imageSamplesFromEpqs,
+  imageSamplesRoute,
+} from './usgs-image-server.js';
 
 export type ToolDefinition = Parameters<typeof runToolContract>[0];
 export type ToolResult = Awaited<ReturnType<typeof runToolContract>>;
@@ -24,7 +32,9 @@ export type ToolContext = Parameters<typeof runToolContract>[2];
 
 export interface Upstreams {
   baseUrl?: string;
+  catalog?: Parameters<typeof catalogRoute>[0];
   epqs?: Parameters<typeof epqsRoute>[0];
+  imageSamples?: Parameters<typeof imageSamplesRoute>[0];
   otd?: Parameters<typeof otdRoute>[1];
 }
 
@@ -32,9 +42,16 @@ export interface Upstreams {
 export function useUpstreams({
   baseUrl = OTD_SELF_HOSTED_BASE_URL,
   epqs = () => epqsResponse(EPQS_MISS_TEXTS.callFailed),
+  imageSamples = imageSamplesFromEpqs(epqs),
+  catalog = defaultCatalogResponse,
   otd = otdByPoint(),
 }: Upstreams = {}): FetchMockHarness {
-  const http = createFetchMock([epqsRoute(epqs), otdRoute(baseUrl, otd)]);
+  const http = createFetchMock([
+    epqsRoute(epqs),
+    imageSamplesRoute(imageSamples),
+    catalogRoute(catalog),
+    otdRoute(baseUrl, otd),
+  ]);
   initElevationServices({ openTopoDataBaseUrl: baseUrl }, { fetch: http.fetch });
   return http;
 }
@@ -132,7 +149,11 @@ export const epqsAnswers = (table: Record<string, EpqsAnswer>) =>
 export async function otdRequests(http: FetchMockHarness) {
   return Promise.all(
     http.calls
-      .filter((call) => call.request.method === 'POST')
+      .filter(
+        ({ request }) =>
+          request.method === 'POST' &&
+          decodeURIComponent(new URL(request.url).pathname) === OTD_PATH,
+      )
       .map(async (call) => {
         const { locations } = JSON.parse(await call.request.clone().text()) as {
           locations: string;
@@ -143,4 +164,15 @@ export async function otdRequests(http: FetchMockHarness) {
 }
 
 export const epqsRequestCount = (http: FetchMockHarness) =>
-  http.calls.filter((call) => call.request.method === 'GET').length;
+  http.calls.filter(({ request }) => {
+    const url = new URL(request.url);
+    return request.method === 'GET' && url.origin === EPQS_ORIGIN && url.pathname === EPQS_PATH;
+  }).length;
+
+export const imageSampleRequestCount = (http: FetchMockHarness) =>
+  http.calls.filter(({ request }) => request.method === 'POST' && request.url === IMAGE_SAMPLE_URL)
+    .length;
+
+export const catalogRequestCount = (http: FetchMockHarness) =>
+  http.calls.filter(({ request }) => request.method === 'POST' && request.url === CATALOG_URL)
+    .length;

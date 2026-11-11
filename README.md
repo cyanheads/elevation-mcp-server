@@ -52,13 +52,13 @@ Every successful result includes `vertical_reference` on both response surfaces.
 
 - `points`: 1–1,000 `{lat, lon}` objects in decimal degrees (WGS84), or a single point. Only the first 100 are validated and sampled; the remainder stays unvalidated
 - `requested_points`, `processed_points`, and `remaining_points` count submitted positions, including duplicates and misses. `next_offset` is the index after this call's processed prefix, or `null` when exhausted; continue with `originalPoints.slice(next_offset)`, where `originalPoints` is the array submitted in that call. Use each newly submitted array for the next slice
-- Each point comes back `ok` or `no_data` (a miss never fails the call), with `elevation_m` / `elevation_ft`, `dataset`, and `resolution_m` (omitted for `mapzen`); 3DEP answers add `raster_id` and `acquisition_date`. `points_with_data` counts the hits
+- Each point has status `ok` or `no_data`. Hits include elevation in meters and feet, the dataset, and resolution when available. 3DEP hits can include `raster_id` and a UTC `YYYY-MM-DD` acquisition date from the raster catalog. A missing date is omitted and flagged in the notice. `points_with_data` counts the hits
 
 ---
 
 ### `elevation_get_profile` <sub>tool</sub>
 
-- `path`: 2–1,000 vertices in travel order (consecutive duplicates dropped); `samples`: 2–250 evenly spaced points along it, endpoints included (default 100)
+- `path`: 2–1,000 vertices in travel order (consecutive duplicates dropped). `samples` takes 2–250 evenly spaced points along it, endpoints included (default 100). Requests of 251–1,000 are served at 250 with a notice by default
 - `summary` carries `total_distance_m`, `ascent_m` / `descent_m` (and feet), start, end, min, and max elevation, `highest_point` / `lowest_point`, and `max_grade_pct` / `min_grade_pct` with where each occurs; ascent depends on the reported `sample_interval_m`. Fails as `degenerate_path` (under 1 m of route), `antipodal_path` (add an intermediate waypoint between the identified zero-based input vertices), or `no_coverage` (no sample has data)
 - `include_samples` (default `true`) returns `samples[]` (distance, position, elevation, grade, dataset, and resolution per sample); `false` omits it and the sample table, and the rest of the result is unchanged
 
@@ -74,8 +74,9 @@ Every successful result includes `vertical_reference` on both response surfaces.
 
 ### `elevation_check_line_of_sight` <sub>tool</sub>
 
-- `observer` and `target` points, at most 1,000 km apart; `observer_height_m` (default 1.7) and `target_height_m` (default 0), each 0–10,000 m above ground; `earth_model` `flat`, `geometric`, `optical` (default, κ 0.13), or `radio` (κ 0.25); `samples` 3–250 (default 100); optional `water_surface_m` (-500 to 9,000) and `frequency_mhz` (30–300,000)
+- `observer` and `target` points, at most 1,000 km apart; `observer_height_m` (default 1.7) and `target_height_m` (default 0), each 0–10,000 m above ground; `earth_model` `flat`, `geometric`, `optical` (default, κ 0.13), or `radio` (κ 0.25); `samples` 3–250 (default 100, with 251–1,000 served at 250 with a notice by default); optional `water_surface_m` (-500 to 9,000) and `frequency_mhz` (30–300,000)
 - `verdict` is `clear`, `blocked`, or `indeterminate` (samples without data leave the line unconfirmed), with `min_clearance_m` / `min_clearance_ft`, the `limiting_point`, and the `first_obstruction` when blocked. Fails as `same_endpoints` (under 1 m apart), `sightline_too_long` (over 1,000 km apart), or `endpoint_no_data`
+- A `clear` or `indeterminate` result warns when reported spacing exceeds both 30 m and 20 times the finest answering resolution. A ridge can fall between samples. At the 250-sample cap the verdict applies at the sampled points
 - `frequency_mhz` adds `fresnel`: a `sufficient`, `insufficient`, or `indeterminate` verdict against the 60% free-space bar of the first Fresnel zone, `min_clearance_ratio` (clearance over zone radius), and the sample that limits it, which is often not `limiting_point`
 - Terrain only: buildings and vegetation count only as far as the elevation source captures them. Where Mapzen reports sea-floor depth, clearance is measured to the sea surface; USGS 3DEP values below 0 m (bay floor in some bays, or dry land) count as received unless `water_surface_m` sets a water level, which then applies to every sample
 
@@ -90,9 +91,9 @@ Every successful result includes `vertical_reference` on both response surfaces.
 | `opentopodata_rate_limited` | `RateLimited` | Open Topo Data kept answering HTTP 429, or asked for a wait over 8 s; `data.retryAfter` in seconds when it sent one of at most a day |
 | `opentopodata_daily_limit` | `RateLimited` | Public instance only: this server already sent 1,000 requests in the trailing 24 hours, so none was sent; `data.retryAfter` is the seconds until a slot frees |
 | `opentopodata_config_rejected` | `ConfigurationError` | The instance at `OPENTOPODATA_BASE_URL` answered 401, 403, or 404, redirected (self-hosted only; never followed), lacks `srtm30m` or `mapzen`, caps locations below 100, or answered from a dataset this server didn't request; the operator must fix it |
-| `sampling_deadline_exceeded` | `Timeout` | The 45 s sampling budget ran out (`data.provider` names the provider it was waiting on), or other calls' queued USGS 3DEP lookups left no time for this call's, so it sent none and `data.retryAfter` is the seconds until they drain |
+| `sampling_deadline_exceeded` | `Timeout` | The 45 s sampling budget ran out, or outstanding EPQS lookups left no time for this call's point requests. `data.provider` names the provider. On an EPQS queue refusal, `data.retryAfter` gives the seconds until existing lookups drain |
 
-A coverage miss is never an error: that point has no data. Any provider failure fails the whole call with no partial result.
+A coverage miss leaves that point without data. A required elevation lookup that fails stops the call. An unavailable acquisition date leaves the elevation intact.
 
 ## Features
 
@@ -102,7 +103,7 @@ Elevation-specific:
 
 - `source` on every tool: `auto` (default) queries USGS 3DEP inside its coverage and sends 3DEP misses and everything outside it to Open Topo Data; `usgs_3dep` and `opentopodata` pin one provider. Only a coverage miss falls back, never an outage
 - Open Topo Data answers from SRTM GL1 v3 (about 30 m, land between 60°N and 56°S), then Mapzen terrain tiles where SRTM has no tile: high latitudes, Antarctica, and ocean bathymetry
-- Per-call caps of 100 points or 250 samples or grid cells, inside a 45 s sampling budget; each 3DEP point is its own request (6 concurrent, 10 per second), while Open Topo Data takes 100 points per request
+- Profiles, grids, and sightlines batch USGS 3DEP samples through the ImageServer in groups of up to 50, then use point queries (EPQS) for unanswered positions. Spot heights use EPQS. Open Topo Data takes up to 100 points per request. Sampling has a 45 s budget
 - The public Open Topo Data instance is paced under its published limits: one request at a time, starts at least 1.1 s apart, at most 1,000 in any trailing 24 hours per server process
 - Profiles, grids, and sightlines are computed locally from point samples, with great-circle distances and resampling and earth curvature with standard refraction
 
@@ -146,12 +147,14 @@ See [Running the server](#running-the-server) for source and Docker setup.
 | Variable | Description | Default |
 |:---|:---|:---|
 | `OPENTOPODATA_BASE_URL` | Open Topo Data instance used outside USGS 3DEP coverage, as an `http` or `https` URL. Unset or blank means the public instance; any other URL is treated as a self-hosted instance. | `https://api.opentopodata.org` |
+| `ELEVATION_REPAIR_OPTIONAL_SCALARS` | Accept unambiguous numeric and boolean strings for optional tool fields when the repaired value passes validation. | `true` |
+| `ELEVATION_CLAMP_LIMITS` | Serve profile and sightline `samples` requests of 251–1,000 at 250 with a notice. Set to `false` to reject counts above 250. | `true` |
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |
 | `MCP_HTTP_PORT` | HTTP server port. | `3010` |
 | `MCP_SESSION_MODE` | HTTP session mode: `stateless`, `stateful`, or `auto`. Overrides the stateless application default. | `stateless` |
 | `MCP_AUTH_MODE` | Authentication: `none`, `jwt`, or `oauth`. Under `jwt` or `oauth`, each tool requires the scope `tool:<tool_name>:read`. | `none` |
 | `MCP_LOG_LEVEL` | Log level (`debug`, `info`, `warning`, `error`, etc.). | `info` |
-| `LOGS_DIR` | Directory for log files (Node.js only). | `<app-root>/logs` |
+| `LOGS_DIR` | Directory for log files (Node.js only). Relative paths resolve from the server package. | `<app-root>/logs` |
 | `OTEL_ENABLED` | Enable [OpenTelemetry](https://github.com/cyanheads/mcp-ts-core/tree/main/docs/telemetry). | `false` |
 
 Any `OPENTOPODATA_BASE_URL` other than the public instance is treated as self-hosted (Open Topo Data is MIT-licensed and runs in Docker): 4 concurrent requests, no rate windows. It must serve datasets named `srtm30m` and `mapzen` and accept at least 100 locations per request, or calls fail with `opentopodata_config_rejected`.
@@ -167,14 +170,14 @@ See [`.env.example`](./.env.example) for every server setting and the common fra
 - **Water.** SRTM reports water inside a land tile as 0 m. Beyond SRTM's tiles, Mapzen reports sea-floor depth, and points, profiles, and grids include it. 3DEP values over water depend on the raster: a hydro-flattened surface, sea level, or bathymetry. Line of sight measures clearance to 0 m over Mapzen values below 0, but uses 3DEP values below 0 m as received, since nothing in a USGS answer tells bay floor from dry land below sea level; its notice flags them, and `water_surface_m` measures a line over water to the water instead.
 - **Mixed models.** 3DEP is a bare-earth DEM, typically NAVD88 in the conterminous US; the exact returned raster reference is unverified and can vary elsewhere. Public SRTM is a radar surface model that partly includes canopy and buildings, using EGM96. Mapzen blends regional sources; self-hosted dataset names do not verify the reference. Heights are not transformed to a common datum, and datum alone does not explain differences between providers.
 - **Sampling.** Features narrower than the sample spacing are missed: a ridge between line-of-sight samples, a summit between grid nodes (re-grid a smaller box around `summary.highest` to refine it), short climbs between profile samples. Spacing is always reported.
-- **USGS 3DEP throughput.** The point query service has no published limit and no batch endpoint: about 10 points per second at this server's pacing, hence the 250-sample cap and 45 s budget. A call whose lookups would push the queue past a running call's budget is refused at once with `sampling_deadline_exceeded` and `data.retryAfter`, so two 250-sample calls at once run in turn: the second can be retried after about 25 s.
-- **Acquisition dates** from USGS are passed through raw in M/D/YYYY form, which sometimes carries a zero month or day; any other form is omitted.
+- **USGS 3DEP throughput.** EPQS starts about 10 point requests per second. When the EPQS queue cannot fit a call's remaining point lookups within the sampling budget, the call fails with `sampling_deadline_exceeded` and `data.retryAfter`. For a computed call this can happen after ImageServer batches have run.
+- **Acquisition dates.** A point lookup adds catalog dates within a separate phase bounded by the remaining sampling budget and 4 s. If that lookup times out or the catalog lacks a valid date, the point retains its elevation and the result flags the missing date.
 - **Antimeridian.** A grid box cannot cross longitude 180, so split it into two calls. Paths and sightlines crossing it work.
 - **Line of sight** is limited to 1,000 km, where the parabolic curvature approximation overstates the midpoint rise by up to about 10 m. Its Fresnel check covers the first zone against the 60% bar at the chosen earth model, at the sample positions only, with no diffraction loss or worst-case k factor.
 
 ## Running the server
 
-Requires Bun 1.4.0+ or Node.js 24+. Both elevation providers are keyless. For heavy global use, set `OPENTOPODATA_BASE_URL` to a self-hosted Open Topo Data instance with `srtm30m`, `mapzen`, and at least 100 locations per request.
+Requires Bun 1.4.4+ or Node.js 24+. Both elevation providers are keyless. For heavy global use, set `OPENTOPODATA_BASE_URL` to a self-hosted Open Topo Data instance with `srtm30m`, `mapzen`, and at least 100 locations per request.
 
 ```sh
 git clone https://github.com/cyanheads/elevation-mcp-server.git
@@ -221,13 +224,13 @@ MCP_TRANSPORT_TYPE=http MCP_HTTP_PORT=3010 bun run start:http
 | Directory | Purpose |
 |:---|:---|
 | `src/index.ts` | `createApp()` entry point: registers the four tools, builds the server instructions from config, and starts and disposes the elevation services. |
-| `src/config` | `OPENTOPODATA_BASE_URL` parsing and validation with Zod. |
+| `src/config` | Upstream and argument-handling settings, parsed with Zod. |
 | `src/mcp-server/tools/definitions` | Tool definitions (`*.tool.ts`). |
 | `src/mcp-server/tools/shared` | Input schemas, output schemas, and `format()` helpers shared by the four tools. |
 | `src/services/elevation` | `ElevationSampler` (routing, 3DEP coverage envelope, per-call budget), geometry, attribution, and unit helpers. |
-| `src/services/usgs-epqs` | USGS Elevation Point Query Service client. |
+| `src/services/usgs-epqs` | USGS EPQS point lookups, ImageServer batch sampling, and raster catalog dates. |
 | `src/services/opentopodata` | Open Topo Data client and its request pacers. |
-| `src/services/shared` | Timed fetch attempts and bounded body reads shared by both clients. |
+| `src/services/shared` | Provider transport, timed fetch attempts, and bounded body reads. |
 | `docs/design.md` | Design: tool contracts, computation, services, decisions, and limitations. |
 | `skills/elevation-guide/` | Published workflow and interpretation gates for agents calling the terrain tools. |
 | `tests/` | Unit and tool tests against a mocked upstream. |
