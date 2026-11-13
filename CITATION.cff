@@ -1,0 +1,25 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: elevation-mcp-server
+abstract: "Look up elevation worldwide, profile route ascent/descent, grid areas, check terrain line of sight via MCP. STDIO or Streamable HTTP."
+type: software
+authors:
+  - family-names: Hand
+    given-names: Casey
+    orcid: "https://orcid.org/0009-0009-3726-568X"
+repository-code: "https://github.com/cyanheads/elevation-mcp-server"
+license: Apache-2.0
+doi: 10.5281/zenodo.24193668
+keywords:
+  - mcp
+  - model-context-protocol
+  - elevation
+  - terrain
+  - topography
+  - dem
+  - geospatial
+  - usgs-3dep
+  - srtm
+  - opentopodata
+  - elevation-profile
+  - line-of-sight
